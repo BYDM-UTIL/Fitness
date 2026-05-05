@@ -50,8 +50,12 @@ self.addEventListener('fetch', event => {
   // רק GET requests
   if (event.request.method !== 'GET') return;
 
-  // דלג על בקשות שאינן לאתר שלנו
   const url = new URL(event.request.url);
+
+  // לא נשמור API במטמון כדי למנוע נתונים ישנים
+  if (url.pathname.startsWith('/api/')) return;
+
+  // דלג על בקשות שאינן לאתר שלנו
   if (url.origin !== self.location.origin) return;
 
   event.respondWith(

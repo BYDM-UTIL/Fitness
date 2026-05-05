@@ -4,6 +4,7 @@
 //  קבועים ומפתח localStorage
 // ============================================================
 const STORAGE_KEY = 'fitness-tracker-v1';
+const API_BASE_URL = window.FITNESS_API_BASE_URL || '';
 
 const DEFAULT_STATE = {
   balance: 0,
@@ -17,10 +18,14 @@ const DEFAULT_STATE = {
 // ============================================================
 //  ניהול state
 // ============================================================
-let state = loadState();
+let state = { ...DEFAULT_STATE };
 
 /** טוען את המצב מה-localStorage, ממזג עם ברירות מחדל */
 function loadState() {
+  return loadStateFromLocalStorage();
+}
+
+function loadStateFromLocalStorage() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -35,12 +40,61 @@ function loadState() {
 }
 
 /** שומר את המצב הנוכחי ב-localStorage */
-function saveState() {
+function saveStateToLocalStorage() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch (e) {
     console.error('[FitnessTracker] saveState failed:', e);
     showToast('שגיאה בשמירת הנתונים', 'error');
+  }
+}
+
+async function loadStateFromServer() {
+  const res = await fetch(`${API_BASE_URL}/api/state`, {
+    method: 'GET',
+    headers: { 'Accept': 'application/json' },
+    cache: 'no-store'
+  });
+
+  if (!res.ok) {
+    throw new Error(`Server load failed: ${res.status}`);
+  }
+
+  const payload = await res.json();
+  if (!payload || typeof payload !== 'object' || !payload.state) {
+    throw new Error('Server returned invalid payload');
+  }
+  return { ...DEFAULT_STATE, ...payload.state };
+}
+
+async function saveState() {
+  // שמירה מיידית ל-localStorage כגיבוי, ואז sync לשרת
+  saveStateToLocalStorage();
+
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/state`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state })
+    });
+    if (!res.ok) {
+      throw new Error(`Server save failed: ${res.status}`);
+    }
+  } catch (e) {
+    console.warn('[FitnessTracker] saveState server sync failed:', e);
+  }
+}
+
+async function hydrateState() {
+  const localState = loadStateFromLocalStorage();
+  state = localState;
+
+  try {
+    const serverState = await loadStateFromServer();
+    state = serverState;
+    saveStateToLocalStorage();
+  } catch (e) {
+    console.warn('[FitnessTracker] using local state (server unavailable):', e);
   }
 }
 
@@ -805,7 +859,10 @@ function setupKeyboardHandlers() {
 // ============================================================
 //  אתחול
 // ============================================================
-function init() {
+async function init() {
+  // טוען state מהשרת (עם fallback ללוקאלי)
+  await hydrateState();
+
   // עדכון UI ראשוני
   updateHomeUI();
 
