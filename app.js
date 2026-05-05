@@ -23,6 +23,7 @@ let _cloudReady = false;
 let _firebaseDb = null;
 let _firebaseUid = null;
 let _lastCloudSyncAt = null;
+let _cloudInitError = '';
 
 /** טוען את המצב מה-localStorage, ממזג עם ברירות מחדל */
 function loadState() {
@@ -41,7 +42,14 @@ function hasUsableFirebaseConfig() {
 
 async function initFirebaseCloud() {
   if (_cloudReady) return true;
-  if (!window.firebase || !hasUsableFirebaseConfig()) return false;
+  if (!window.firebase) {
+    _cloudInitError = 'Firebase SDK לא נטען (ייתכן חסימת רשת ארגונית)';
+    return false;
+  }
+  if (!hasUsableFirebaseConfig()) {
+    _cloudInitError = 'הגדרת Firebase חסרה או לא תקינה';
+    return false;
+  }
 
   try {
     if (!firebase.apps.length) {
@@ -56,12 +64,30 @@ async function initFirebaseCloud() {
     _firebaseDb = firebase.firestore();
     _firebaseUid = auth.currentUser && auth.currentUser.uid;
     _cloudReady = Boolean(_firebaseDb && _firebaseUid);
+    _cloudInitError = '';
     return _cloudReady;
   } catch (e) {
     console.warn('[FitnessTracker] Firebase init failed:', e);
     _cloudReady = false;
+    _cloudInitError = formatCloudError(e);
     return false;
   }
+}
+
+function formatCloudError(error) {
+  const raw = (error && (error.code || error.message)) ? `${error.code || ''} ${error.message || ''}` : '';
+
+  if (/api-key|api key|referrer|auth\/invalid-api-key/i.test(raw)) {
+    return 'מפתח Firebase חסום לדומיין הנוכחי (בדוק API key restrictions)';
+  }
+  if (/network|failed to fetch|offline/i.test(raw)) {
+    return 'אין גישה לשירותי Firebase מהרשת הנוכחית';
+  }
+  if (/auth\/operation-not-allowed/i.test(raw)) {
+    return 'Anonymous Sign-in כבוי ב-Firebase Authentication';
+  }
+
+  return 'שגיאה בהתחברות לענן';
 }
 
 function getCloudDocRef() {
@@ -183,7 +209,7 @@ function updateCloudSyncStatus(message) {
   }
 
   if (!_cloudReady) {
-    el.textContent = 'ענן: לא מחובר';
+    el.textContent = _cloudInitError ? `ענן: לא מחובר (${_cloudInitError})` : 'ענן: לא מחובר';
     return;
   }
 
