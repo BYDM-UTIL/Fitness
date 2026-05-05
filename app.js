@@ -86,6 +86,9 @@ function formatCloudError(error) {
   if (/auth\/operation-not-allowed/i.test(raw)) {
     return 'Anonymous Sign-in כבוי ב-Firebase Authentication';
   }
+  if (/auth\/configuration-not-found|configuration-not-found/i.test(raw)) {
+    return 'Firebase Authentication לא הוגדר בפרויקט (יש להפעיל Authentication + Anonymous)';
+  }
 
   return 'שגיאה בהתחברות לענן';
 }
