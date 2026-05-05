@@ -25,6 +25,9 @@ let state = { ...DEFAULT_STATE };
 let _cloudReady = false;
 let _firebaseDb = null;
 let _firebaseUid = null;
+let _firebaseMessaging = null;
+let _fcmToken = '';
+let _swRegistration = null;
 let _lastCloudSyncAt = null;
 let _cloudInitError = '';
 let _editingEntryId = null;
@@ -48,6 +51,21 @@ function hasUsableFirebaseConfig() {
     const value = FIREBASE_CONFIG[key];
     return typeof value === 'string' && value.trim() && !value.includes('REPLACE_');
   });
+}
+
+function hasUsableVapidKey() {
+  const key = FIREBASE_CONFIG && FIREBASE_CONFIG.vapidKey;
+  return typeof key === 'string' && key.trim() && !key.includes('REPLACE_');
+}
+
+function canUseCloudPush() {
+  return Boolean(
+    window.isSecureContext &&
+    'serviceWorker' in navigator &&
+    'PushManager' in window &&
+    window.firebase &&
+    typeof firebase.messaging === 'function'
+  );
 }
 
 async function initFirebaseCloud() {
@@ -81,6 +99,23 @@ async function initFirebaseCloud() {
     _cloudReady = false;
     _cloudInitError = formatCloudError(e);
     return false;
+  }
+}
+
+async function initFirebaseMessaging() {
+  if (_firebaseMessaging) return _firebaseMessaging;
+  if (!canUseCloudPush()) return null;
+  if (!hasUsableVapidKey()) return null;
+
+  try {
+    if (!firebase.apps.length) {
+      firebase.initializeApp(FIREBASE_CONFIG);
+    }
+    _firebaseMessaging = firebase.messaging();
+    return _firebaseMessaging;
+  } catch (e) {
+    console.warn('[FitnessTracker] Firebase messaging init failed:', e);
+    return null;
   }
 }
 
@@ -445,7 +480,11 @@ async function saveNotificationSettings() {
     if (!granted) {
       state.notificationsEnabled = false;
       toggle.checked = false;
+    } else {
+      await syncCloudPushToken();
     }
+  } else {
+    updatePushStatus('Push מהענן כבוי (המתג כבוי)');
   }
 
   saveState();
@@ -496,6 +535,97 @@ function updateNotificationStatus(msg) {
   }
 }
 
+function updatePushStatus(msg) {
+  const el = document.getElementById('push-status');
+  if (!el) return;
+
+  if (msg) {
+    el.textContent = msg;
+    return;
+  }
+
+  if (!state.notificationsEnabled) {
+    el.textContent = 'Push מהענן כבוי (התראות לא פעילות)';
+    return;
+  }
+
+  if (!canUseCloudPush()) {
+    el.textContent = 'Push מהענן לא זמין במכשיר/דפדפן הזה';
+    return;
+  }
+
+  if (!hasUsableVapidKey()) {
+    el.textContent = 'חסר VAPID key ב-firebase-config.js';
+    return;
+  }
+
+  if (_fcmToken) {
+    el.textContent = 'Push מהענן פעיל ✓ (הטוקן נרשם בענן)';
+    return;
+  }
+
+  el.textContent = 'Push מהענן עדיין לא נרשם';
+}
+
+async function syncCloudPushToken() {
+  if (!state.notificationsEnabled) return;
+
+  if (!canUseCloudPush()) {
+    updatePushStatus('Push מהענן לא זמין במכשיר/דפדפן הזה');
+    return;
+  }
+
+  if (!hasUsableVapidKey()) {
+    updatePushStatus('חסר VAPID key ב-firebase-config.js');
+    return;
+  }
+
+  const cloudOk = await initFirebaseCloud();
+  if (!cloudOk) {
+    updatePushStatus('Push מהענן לא נרשם כי אין חיבור Firebase');
+    return;
+  }
+
+  const messaging = await initFirebaseMessaging();
+  if (!messaging) {
+    updatePushStatus('Firebase Messaging לא נטען');
+    return;
+  }
+
+  const registration = await registerServiceWorker();
+  if (!registration) {
+    updatePushStatus('Service Worker לא נרשם ולכן Push לא פעיל');
+    return;
+  }
+
+  try {
+    const token = await messaging.getToken({
+      vapidKey: FIREBASE_CONFIG.vapidKey,
+      serviceWorkerRegistration: registration
+    });
+
+    if (!token) {
+      updatePushStatus('לא התקבל טוקן Push מהדפדפן');
+      return;
+    }
+
+    _fcmToken = token;
+    const ref = getCloudDocRef();
+    await ref.set(
+      {
+        pushTokens: firebase.firestore.FieldValue.arrayUnion(token),
+        pushUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    updatePushStatus();
+  } catch (e) {
+    console.warn('[FitnessTracker] push token registration failed:', e);
+    updatePushStatus('נכשלה הרשמת Push בענן');
+  }
+}
+
 function updateReminderStatus() {
   const el = document.getElementById('reminder-status');
   if (!el) return;
@@ -511,7 +641,7 @@ function updateNotificationLimitations() {
   const el = document.getElementById('notification-limitations');
   if (!el) return;
 
-  el.textContent = 'ברקע אמיתי או במסך נעול iPhone עשוי להשהות את האפליקציה. כדי לקבל תזכורות ברקע נדרש Push אמיתי מהענן, לא רק טיימר מקומי.';
+  el.textContent = 'ברקע אמיתי או במסך נעול iPhone עשוי להשהות אפליקציה. לכן תזכורת מבוססת טיימר מקומי אינה אמינה ברקע. Push אמיתי מהענן נרשם כאן ללא עלות.';
 }
 
 // ============================================================
@@ -1044,6 +1174,7 @@ function renderSettings() {
 
   updateNotificationStatus();
   updateReminderStatus();
+  updatePushStatus();
   updateNotificationLimitations();
   updateCloudSyncStatus();
 }
@@ -1370,12 +1501,17 @@ function isIOS() {
 // ============================================================
 //  רישום Service Worker
 // ============================================================
-function registerServiceWorker() {
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker
-      .register('sw.js')
-      .then(reg => console.log('[FitnessTracker] SW registered, scope:', reg.scope))
-      .catch(err => console.warn('[FitnessTracker] SW registration failed:', err));
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return null;
+  if (_swRegistration) return _swRegistration;
+
+  try {
+    _swRegistration = await navigator.serviceWorker.register('sw.js');
+    console.log('[FitnessTracker] SW registered, scope:', _swRegistration.scope);
+    return _swRegistration;
+  } catch (err) {
+    console.warn('[FitnessTracker] SW registration failed:', err);
+    return null;
   }
 }
 
@@ -1426,7 +1562,12 @@ async function init() {
   setupReminderCheck();
 
   // רישום Service Worker
-  registerServiceWorker();
+  await registerServiceWorker();
+
+  // הרשמת Push מהענן כשמתאים
+  if (state.notificationsEnabled && Notification.permission === 'granted') {
+    await syncCloudPushToken();
+  }
 
   // מקשי Enter
   setupKeyboardHandlers();

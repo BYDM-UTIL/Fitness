@@ -4,5 +4,6 @@ window.FIREBASE_CONFIG = {
   projectId: 'REPLACE_PROJECT_ID',
   storageBucket: 'REPLACE_PROJECT_ID.firebasestorage.app',
   messagingSenderId: 'REPLACE_SENDER_ID',
-  appId: 'REPLACE_APP_ID'
+  appId: 'REPLACE_APP_ID',
+  vapidKey: 'REPLACE_WEB_PUSH_CERTIFICATE_KEY'
 };

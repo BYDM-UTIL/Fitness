@@ -44,6 +44,26 @@ npx firebase-tools deploy --only hosting
 2. Share -> Add to Home Screen
 3. Launch from the icon
 
+## 8) Enable free cloud push (FCM)
+This setup is fully free and gives real cloud push delivery.
+
+1. In Firebase Console open Project settings -> Cloud Messaging.
+2. Under Web configuration, generate a Web Push certificate key (VAPID).
+3. Put this value in local firebase-config.js as vapidKey.
+4. Deploy hosting again.
+5. In app Settings -> Reminders, enable notifications and save.
+6. Confirm that status says Push cloud is active.
+
+### Test cloud push for free
+1. Open Firebase Console -> Cloud Messaging -> Create campaign.
+2. Choose Web Push notification.
+3. Send a test message to the token registered by the app.
+4. You will get a real push from the cloud, even without local timer.
+
+### Important free limitation
+- Fully automatic daily push from cloud scheduler is not fully free in Firebase, because scheduled cloud jobs require billing-enabled infrastructure.
+- Fully free mode supports real cloud push delivery, but trigger is manual (for example from Firebase Console test/campaign).
+
 ## Notes
 - Data is saved in Firestore cloud per anonymous user.
 - If you uninstall the app or clear Safari website data, a new anonymous user is created.
