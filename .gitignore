@@ -3,3 +3,4 @@ fitness.db
 fitness.db-*
 npm-debug.log*
 .firebase/
+firebase-config.js

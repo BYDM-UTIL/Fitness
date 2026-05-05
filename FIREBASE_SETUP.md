@@ -10,7 +10,8 @@
 2. In General tab, click Add app -> Web (</>)
 3. Register app name (for example: fitness-web)
 4. Copy the firebaseConfig values
-5. Paste them into firebase-config.js
+5. Copy firebase-config.example.js to firebase-config.js
+6. Paste the real firebaseConfig values into firebase-config.js (this file is ignored by git)
 
 ## 3) Enable Authentication (Anonymous)
 1. In Firebase console open Authentication
