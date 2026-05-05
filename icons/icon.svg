@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- רקע כחול עם פינות מעוגלות – סגנון iOS -->
+  <rect width="100" height="100" rx="22" ry="22" fill="#007AFF"/>
+
+  <!-- אייקון דמבל לבן -->
+  <g fill="white">
+    <!-- צלחת שמאל פנימית -->
+    <rect x="4"  y="38" width="6"  height="24" rx="3"/>
+    <!-- משקולת שמאל -->
+    <rect x="10" y="33" width="14" height="34" rx="4"/>
+    <!-- מוט מרכזי -->
+    <rect x="24" y="44" width="52" height="12" rx="4"/>
+    <!-- משקולת ימין -->
+    <rect x="76" y="33" width="14" height="34" rx="4"/>
+    <!-- צלחת ימין פנימית -->
+    <rect x="90" y="38" width="6"  height="24" rx="3"/>
+  </g>
+</svg>

@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#007AFF">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="כושר">
+  <meta name="description" content="מעקב תשלומים ואימוני כושר">
+  <title>כושר - מעקב אימונים</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <!-- Apple touch icon - נוצר דינמית ב-JS -->
+  <link id="apple-touch-icon" rel="apple-touch-icon" href="icons/icon.svg">
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ===== מסך בית ===== -->
+  <div id="screen-home" class="screen active">
+    <div class="safe-top"></div>
+    <div class="screen-content">
+      <div class="header">
+        <div class="app-title">כושר 💪</div>
+        <div class="app-subtitle">מעקב אימונים ותשלומים</div>
+      </div>
+
+      <!-- כרטיס יתרה -->
+      <div class="card balance-card">
+        <div class="card-label">יתרה בקופה</div>
+        <div class="balance-amount" id="balance-display">₪0</div>
+        <div class="balance-meta" id="balance-meta">הקופה ריקה</div>
+      </div>
+
+      <!-- שורת סטטיסטיקות -->
+      <div class="stats-row">
+        <div class="stat-card">
+          <div class="stat-value" id="total-workouts-display">0</div>
+          <div class="stat-label">אימונים שבוצעו</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="remaining-workouts-display">0</div>
+          <div class="stat-label">אימונים נותרים</div>
+        </div>
+      </div>
+
+      <!-- תקציר טקסטואלי -->
+      <div class="summary-card" id="summary-text">הגדר יתרה כדי להתחיל</div>
+
+      <!-- שאלת אימון יומי -->
+      <div class="workout-question-card">
+        <div class="workout-question-title">🏋️ היה אימון היום?</div>
+        <div class="workout-question-buttons">
+          <button class="btn btn-primary btn-workout-answer" id="btn-workout" onclick="handleWorkout()">כן ✓</button>
+          <button class="btn btn-secondary btn-workout-answer" onclick="skipWorkout()">לא ✕</button>
+        </div>
+      </div>
+
+      <!-- כפתורים משניים -->
+      <div class="action-buttons">
+        <button class="btn btn-green btn-full" onclick="showSubScreen('add-money')">
+          <span class="btn-icon">💰</span>
+          <span>הוסף כסף לקופה</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== מסך לוג ===== -->
+  <div id="screen-log" class="screen">
+    <div class="safe-top"></div>
+    <div class="screen-content">
+      <div class="header">
+        <div class="screen-title">לוג פעולות</div>
+      </div>
+      <div id="log-container">
+        <!-- יוצג דינמית -->
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== מסך הגדרות ===== -->
+  <div id="screen-settings" class="screen">
+    <div class="safe-top"></div>
+    <div class="screen-content">
+      <div class="header">
+        <div class="screen-title">הגדרות</div>
+      </div>
+
+      <!-- תמחור -->
+      <div class="settings-section">
+        <div class="settings-section-title">תמחור</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-row-label">
+              <span class="settings-icon">💰</span>
+              <span>מחיר לאימון</span>
+            </div>
+            <div class="settings-row-value">
+              <input type="number" id="price-input" class="settings-input" min="1" step="5" placeholder="80">
+              <span class="currency">₪</span>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="updatePrice()">שמור מחיר</button>
+        </div>
+      </div>
+
+      <!-- תזכורות -->
+      <div class="settings-section">
+        <div class="settings-section-title">תזכורות</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-row-label">
+              <span class="settings-icon">🕘</span>
+              <span>שעת תזכורת יומית</span>
+            </div>
+            <div class="settings-row-value">
+              <input type="time" id="reminder-time-input" class="settings-input" value="09:00">
+            </div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-label">
+              <span class="settings-icon">🔔</span>
+              <span>הפעל התראות</span>
+            </div>
+            <div class="settings-row-value">
+              <label class="toggle" role="switch" aria-label="הפעל התראות">
+                <input type="checkbox" id="notifications-toggle">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveNotificationSettings()">שמור הגדרות</button>
+          <div id="notification-status" class="notification-status"></div>
+        </div>
+      </div>
+
+      <!-- הוראות iOS PWA – מוצגות רק ב-iOS -->
+      <div class="settings-section" id="ios-pwa-notice" style="display:none;">
+        <div class="settings-section-title">התקנה באייפון</div>
+        <div class="settings-card info-card">
+          <div class="info-icon">ℹ️</div>
+          <p><strong>הוספה למסך הבית:</strong></p>
+          <p>1. פתח ב-Safari</p>
+          <p>2. לחץ על כפתור השיתוף <strong>⬆️</strong></p>
+          <p>3. בחר <strong>"הוסף למסך הבית"</strong></p>
+          <p style="margin-top:8px; color:#666; font-size:13px;">
+            לאחר ההתקנה, התראות אינן נתמכות ב-iOS. יוצגו תזכורות בתוך האפליקציה.
+          </p>
+        </div>
+      </div>
+
+      <!-- ניהול נתונים -->
+      <div class="settings-section">
+        <div class="settings-section-title">ניהול נתונים</div>
+        <div class="settings-card">
+          <button class="btn btn-secondary btn-full" onclick="exportData()">
+            <span class="btn-icon">📤</span>
+            <span>ייצוא גיבוי TXT</span>
+          </button>
+          <div style="height:10px"></div>
+          <button class="btn btn-secondary btn-full" onclick="triggerImport()">
+            <span class="btn-icon">📥</span>
+            <span>ייבוא גיבוי TXT</span>
+          </button>
+          <!-- input מוסתר לפתיחת בחירת קובץ -->
+          <input type="file" id="import-file-input" accept=".txt" style="display:none;" onchange="importData(event)">
+        </div>
+      </div>
+
+      <!-- אזור מסוכן -->
+      <div class="settings-section">
+        <div class="settings-section-title danger-title">אזור מסוכן</div>
+        <div class="settings-card danger-card">
+          <button class="btn btn-danger btn-full" onclick="resetData()">
+            <span class="btn-icon">🗑️</span>
+            <span>איפוס כל הנתונים</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="app-version">גרסה 1.0.0</div>
+    </div>
+  </div>
+
+  <!-- ===== שכבת-על: הוספת כסף ===== -->
+  <div id="sub-screen-add-money" class="sub-screen" style="display:none;" onclick="handleSubScreenOverlayClick(event)">
+    <div class="sub-screen-content" onclick="event.stopPropagation()">
+      <div class="sub-screen-header">
+        <button class="back-btn" onclick="hideSubScreen()" aria-label="סגור">✕</button>
+        <h2>הוסף כסף לקופה</h2>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="add-money-input">סכום להוספה (ש״ח)</label>
+        <input type="number" id="add-money-input" class="form-input" placeholder="לדוגמה: 400" min="1" step="10" inputmode="decimal">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="add-money-note">הערה (אופציונלי)</label>
+        <input type="text" id="add-money-note" class="form-input" placeholder="לדוגמה: תשלום חודשי">
+      </div>
+      <button class="btn btn-green btn-full" onclick="addMoney()">
+        <span class="btn-icon">💰</span>
+        <span>הוסף לקופה</span>
+      </button>
+    </div>
+  </div>
+
+
+
+  <!-- ===== דיאלוג אישור מותאם (ללא חסימת לחיצות) ===== -->
+  <div id="confirm-overlay" class="confirm-overlay" style="display:none;" role="dialog" aria-modal="true">
+    <div class="confirm-dialog">
+      <div class="confirm-icon" id="confirm-icon">⚠️</div>
+      <h3 id="confirm-title">אישור</h3>
+      <p id="confirm-message"></p>
+      <div class="confirm-buttons">
+        <button class="btn btn-secondary" onclick="confirmCancel()">ביטול</button>
+        <button class="btn btn-danger" id="confirm-ok-btn" onclick="confirmOk()">אישור</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Toast הודעות ===== -->
+  <div id="toast" class="toast" role="alert" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- ===== ניווט תחתי ===== -->
+  <nav id="bottom-nav" role="navigation" aria-label="ניווט ראשי">
+    <button class="nav-btn active" onclick="showScreen('home')" data-screen="home" aria-label="בית">
+      <span class="nav-icon">🏠</span>
+      <span class="nav-label">בית</span>
+    </button>
+    <button class="nav-btn" onclick="showScreen('log')" data-screen="log" aria-label="לוג">
+      <span class="nav-icon">📋</span>
+      <span class="nav-label">לוג</span>
+    </button>
+    <button class="nav-btn" onclick="showScreen('settings')" data-screen="settings" aria-label="הגדרות">
+      <span class="nav-icon">⚙️</span>
+      <span class="nav-label">הגדרות</span>
+    </button>
+  </nav>
+
+</div><!-- /#app -->
+
+<script src="app.js"></script>
+</body>
+</html>
