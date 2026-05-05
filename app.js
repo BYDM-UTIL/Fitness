@@ -11,6 +11,7 @@ const DEFAULT_STATE = {
   workoutPrice: 80,
   reminderTime: '09:00',
   notificationsEnabled: false,
+  theme: 'light',
   totalWorkouts: 0,
   logs: [],
   lastReminderAt: null,
@@ -26,6 +27,13 @@ let _firebaseDb = null;
 let _firebaseUid = null;
 let _lastCloudSyncAt = null;
 let _cloudInitError = '';
+let _editingEntryId = null;
+let _isPullRefreshing = false;
+
+const THEME_META_COLORS = {
+  light: '#007AFF',
+  dark: '#0F172A'
+};
 
 /** טוען את המצב מה-localStorage, ממזג עם ברירות מחדל */
 function loadState() {
@@ -242,12 +250,13 @@ function showScreen(name) {
   });
 
   // רינדור תוכן מסך-ספציפי
-  if (name === 'log') renderLog();
+  if (name === 'journal') renderJournal();
+  if (name === 'summary') renderMonthlySummary();
   if (name === 'settings') renderSettings();
 }
 
-/** מציג bottom-sheet (add-money / set-balance) */
-function showSubScreen(name) {
+/** מציג bottom-sheet (add-money / set-balance / edit-entry) */
+function showSubScreen(name, preserveInputs = false) {
   // סגור כל bottom-sheet פתוח
   document.querySelectorAll('.sub-screen').forEach(s => {
     s.style.display = 'none';
@@ -257,10 +266,11 @@ function showSubScreen(name) {
   const target = document.getElementById(`sub-screen-${name}`);
   if (!target) return;
 
-  // ניקוי שדות
-  target.querySelectorAll('input[type="number"], input[type="text"]').forEach(inp => {
-    inp.value = '';
-  });
+  if (!preserveInputs) {
+    target.querySelectorAll('input[type="number"], input[type="text"]').forEach(inp => {
+      inp.value = '';
+    });
+  }
 
   target.style.display = 'flex';
   // עיכוב קטן כדי שה-CSS transition ירוץ
@@ -276,6 +286,8 @@ function hideSubScreen() {
     // מחכה לסיום האנימציה לפני הסרה מה-DOM
     setTimeout(() => { s.style.display = 'none'; }, 340);
   });
+
+  _editingEntryId = null;
 }
 
 /** סגירה בלחיצה על הרקע (overlay) */
@@ -492,7 +504,14 @@ function updateReminderStatus() {
     ? `נשלחה לאחרונה: ${formatDateTime(new Date(state.lastReminderAt))}`
     : 'עדיין לא נשלחה תזכורת.';
 
-  el.textContent = `תזכורת נבדקת רק כשהאפליקציה פתוחה (כל דקה). ${details}`;
+  el.textContent = `התזכורת נבדקת כשהאפליקציה פעילה או חוזרת לקדמה. ${details}`;
+}
+
+function updateNotificationLimitations() {
+  const el = document.getElementById('notification-limitations');
+  if (!el) return;
+
+  el.textContent = 'ברקע אמיתי או במסך נעול iPhone עשוי להשהות את האפליקציה. כדי לקבל תזכורות ברקע נדרש Push אמיתי מהענן, לא רק טיימר מקומי.';
 }
 
 // ============================================================
@@ -522,45 +541,159 @@ function checkReminder() {
   const lastKey = state.lastReminderDateKey || legacyLastKey;
   const diffMs    = now - reminderTime;
 
-  // שלח אם חלפנו את שעת התזכורת באותה דקה ולא שלחנו היום
-  if (diffMs >= 0 && diffMs < 60_000 && lastKey !== todayKey) {
+  // שלח ברגע שעברנו את שעת התזכורת, גם אם ה-interval לא פגע בדיוק בדקה.
+  if (diffMs >= 0 && lastKey !== todayKey) {
     localStorage.setItem('_last-reminder', todayKey);
     state.lastReminderDateKey = todayKey;
     sendReminder();
   }
 }
 
-/** שולח התראה (push אם אפשר, אחרת toast) */
-function sendReminder() {
+/** שולח התראה (Service Worker אם אפשר, אחרת Notification/toast) */
+async function sendReminder(isTest = false) {
   const title = 'כושר – תזכורת יומית';
-  const body  = 'האם היה אימון כושר היום? 🏋️';
+  const body  = isTest ? 'זוהי תזכורת בדיקה כדי לוודא שהתראות פועלות.' : 'האם היה אימון כושר היום? 🏋️';
 
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
-      // התראת push אמיתית
-      // TODO: בעתיד – להחליף ב-Firebase Cloud Messaging (FCM)
-      // fcm.sendNotification({ title, body, icon: 'icons/icon-192.png' });
-      new Notification(title, { body, icon: 'icons/icon.svg' });
+      const registration = 'serviceWorker' in navigator
+        ? await navigator.serviceWorker.getRegistration().catch(() => null)
+        : null;
+
+      if (registration?.showNotification) {
+        await registration.showNotification(title, {
+          body,
+          icon: 'icons/icon.svg',
+          badge: 'icons/icon.svg',
+          tag: isTest ? 'fitness-test-reminder' : 'fitness-daily-reminder',
+          renotify: true,
+          dir: 'rtl',
+          lang: 'he'
+        });
+      } else {
+        new Notification(title, { body, icon: 'icons/icon.svg', dir: 'rtl', lang: 'he' });
+      }
     } else {
-      // fallback – toast פנימי
       showToast(`${title}: ${body}`, 'info');
     }
   } catch {
     showToast(`${title}: ${body}`, 'info');
   }
 
-  state.lastReminderAt = new Date().toISOString();
-  updateReminderStatus();
+  if (!isTest) {
+    state.lastReminderAt = new Date().toISOString();
+    updateReminderStatus();
 
-  // רישום בלוג
-  addLogEntry({
-    type: 'reminder',
-    title: 'תזכורת יומית',
-    amount: 0,
-    balanceAfter: state.balance,
-    note: 'תזכורת יומית אוטומטית'
+    addLogEntry({
+      type: 'reminder',
+      title: 'תזכורת יומית',
+      amount: 0,
+      balanceAfter: state.balance,
+      note: 'תזכורת יומית אוטומטית'
+    });
+    saveState();
+    return;
+  }
+
+  updateNotificationStatus('תזכורת בדיקה נשלחה');
+  showToast('תזכורת בדיקה נשלחה', 'success');
+}
+
+function sendTestReminder() {
+  if (!state.notificationsEnabled) {
+    showToast('יש להפעיל התראות קודם', 'warning');
+    return;
+  }
+
+  sendReminder(true);
+}
+
+async function refreshFromPull() {
+  if (_isPullRefreshing) return;
+
+  _isPullRefreshing = true;
+  setPullRefreshIndicator('מרענן נתונים...', true);
+
+  try {
+    await hydrateState();
+    const registration = 'serviceWorker' in navigator
+      ? await navigator.serviceWorker.getRegistration().catch(() => null)
+      : null;
+    await registration?.update?.();
+    refreshAllUI();
+    showToast('הנתונים עודכנו', 'success');
+  } catch {
+    showToast('לא ניתן היה לרענן כעת', 'error');
+  } finally {
+    _isPullRefreshing = false;
+    setPullRefreshIndicator('משוך למטה כדי לרענן', false);
+  }
+}
+
+function setPullRefreshIndicator(message, active, ready = false) {
+  const indicator = document.getElementById('pull-refresh-indicator');
+  if (!indicator) return;
+
+  indicator.textContent = message;
+  indicator.classList.toggle('visible', active || ready);
+  indicator.classList.toggle('ready', ready);
+  indicator.classList.toggle('refreshing', active);
+}
+
+function setupPullToRefresh() {
+  const screen = document.getElementById('screen-home');
+  if (!screen || screen.dataset.pullToRefreshReady === 'true') return;
+
+  const stateRef = {
+    startY: 0,
+    deltaY: 0,
+    dragging: false
+  };
+
+  screen.addEventListener('touchstart', event => {
+    if (screen.scrollTop > 0 || event.touches.length !== 1 || _isPullRefreshing) return;
+    stateRef.startY = event.touches[0].clientY;
+    stateRef.deltaY = 0;
+    stateRef.dragging = true;
+  }, { passive: true });
+
+  screen.addEventListener('touchmove', event => {
+    if (!stateRef.dragging || event.touches.length !== 1) return;
+
+    stateRef.deltaY = Math.max(0, event.touches[0].clientY - stateRef.startY);
+    if (stateRef.deltaY <= 0 || screen.scrollTop > 0) return;
+
+    const ready = stateRef.deltaY > 70;
+    setPullRefreshIndicator(ready ? 'שחרר כדי לרענן' : 'משוך למטה כדי לרענן', true, ready);
+    if (stateRef.deltaY > 6) {
+      event.preventDefault();
+    }
+  }, { passive: false });
+
+  screen.addEventListener('touchend', () => {
+    if (!stateRef.dragging) return;
+
+    const shouldRefresh = stateRef.deltaY > 70;
+    stateRef.dragging = false;
+    stateRef.deltaY = 0;
+
+    if (shouldRefresh) {
+      refreshFromPull();
+      return;
+    }
+
+    setPullRefreshIndicator('משוך למטה כדי לרענן', false);
   });
-  saveState();
+
+  screen.dataset.pullToRefreshReady = 'true';
+}
+
+function refreshAllUI() {
+  updateHomeUI();
+  renderJournal();
+  renderMonthlySummary();
+  renderSettings();
+  applyTheme(state.theme || 'light');
 }
 
 // ============================================================
@@ -588,16 +721,16 @@ function addLogEntry({ type, title, amount, balanceAfter, note }) {
 }
 
 /** מרנדר את כל הלוג */
-function renderLog() {
-  const container = document.getElementById('log-container');
+function renderJournal() {
+  const container = document.getElementById('journal-container');
   if (!container) return;
 
   if (state.logs.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">📋</div>
-        <h3>אין פעולות עדיין</h3>
-        <p>כאן יופיעו כל הפעולות שביצעת</p>
+        <h3>היומן עדיין ריק</h3>
+        <p>כאן יופיעו כל הפעולות שביצעת ועריכות שבוצעו</p>
       </div>`;
     return;
   }
@@ -619,21 +752,23 @@ function renderLog() {
       .toLocaleDateString('he-IL', { year: 'numeric', month: 'long' });
 
     html += `<div class="log-month-header">${label}</div><div class="log-month-group">`;
-    grouped[monthKey].forEach(entry => { html += buildLogEntryHTML(entry); });
+    grouped[monthKey].forEach(entry => { html += buildJournalEntryHTML(entry); });
     html += `</div>`;
   });
 
   container.innerHTML = html;
 }
 
-/** בונה HTML לרשומת לוג בודדת */
-function buildLogEntryHTML(entry) {
+/** בונה HTML לרשומת יומן בודדת */
+function buildJournalEntryHTML(entry) {
   const CONFIG = {
     workout_done:  { icon: '🏋️', color: 'red',   label: 'אימון'          },
     money_added:   { icon: '💰', color: 'green', label: 'הוספת כסף'      },
     balance_set:   { icon: '✏️', color: 'blue',  label: 'עדכון יתרה'     },
     price_changed: { icon: '🏷️', color: 'blue',  label: 'שינוי מחיר'     },
     reminder:      { icon: '🔔', color: 'gray',  label: 'תזכורת'         },
+    journal_edited:{ icon: '🧾', color: 'gray',  label: 'עריכת יומן'      },
+    journal_deleted:{ icon: '🗑️', color: 'gray', label: 'מחיקת יומן'      },
   };
 
   const cfg = CONFIG[entry.type] || { icon: '📝', color: 'gray', label: entry.type };
@@ -643,8 +778,22 @@ function buildLogEntryHTML(entry) {
     : '';
 
   const noteHTML = entry.note
-    ? `<span class="log-note">${escapeHTML(entry.note)}</span>`
+    ? `<div class="log-note">${escapeHTML(entry.note)}</div>`
     : '';
+
+  const dateTimeHTML = `<div class="log-entry-datetime" dir="rtl"><span>${entry.date}</span><span>${entry.time}</span></div>`;
+
+  const editButtonHTML = `
+    <button
+      class="journal-edit-btn"
+      type="button"
+      data-entry-id="${escapeHTML(entry.id)}"
+      data-entry-title="${escapeHTML(entry.title)}"
+      data-entry-amount="${escapeHTML(entry.amount)}"
+      data-entry-note="${escapeHTML(entry.note || '')}"
+      onclick="openEditEntryFromButton(this)">
+      עריכה
+    </button>`;
 
   return `
     <div class="log-entry">
@@ -652,16 +801,227 @@ function buildLogEntryHTML(entry) {
       <div class="log-entry-body">
         <div class="log-entry-title">${escapeHTML(entry.title)}</div>
         <div class="log-entry-meta">
-          <span>${entry.date}</span>
-          <span>${entry.time}</span>
+          ${dateTimeHTML}
           ${noteHTML}
         </div>
+        <div class="journal-entry-actions">${editButtonHTML}</div>
       </div>
       <div class="log-entry-amounts">
         ${amountHTML}
         <div class="log-balance-after">₪${formatNum(entry.balanceAfter)}</div>
       </div>
     </div>`;
+}
+
+function renderMonthlySummary() {
+  const container = document.getElementById('monthly-summary-container');
+  if (!container) return;
+
+  if (state.logs.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📆</div>
+        <h3>אין עדיין נתונים חודשיים</h3>
+        <p>ברגע שיתחילו להירשם אימונים, יופיע כאן סיכום חודשי מסודר</p>
+      </div>`;
+    return;
+  }
+
+  const currentMonthKey = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+  const summaries = buildMonthlySummaries();
+
+  container.innerHTML = summaries.map(summary => {
+    const isCurrent = summary.monthKey === currentMonthKey;
+    return `
+      <div class="summary-month-card${isCurrent ? ' current' : ''}">
+        <div class="summary-month-header-row">
+          <div class="summary-month-title">${escapeHTML(summary.label)}</div>
+          <div class="summary-month-badge">${isCurrent ? 'החודש' : 'סיכום'}</div>
+        </div>
+        <div class="summary-grid">
+          <div class="summary-stat">
+            <div class="summary-stat-value">${summary.workouts}</div>
+            <div class="summary-stat-label">אימונים</div>
+          </div>
+          <div class="summary-stat">
+            <div class="summary-stat-value">₪${formatNum(summary.spent)}</div>
+            <div class="summary-stat-label">סה"כ ירד</div>
+          </div>
+          <div class="summary-stat">
+            <div class="summary-stat-value">₪${formatNum(summary.added)}</div>
+            <div class="summary-stat-label">סה"כ נוסף</div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function buildMonthlySummaries() {
+  const grouped = new Map();
+
+  state.logs.forEach(entry => {
+    const monthKey = entry.monthKey || deriveMonthKeyFromDate(entry.date);
+    if (!grouped.has(monthKey)) {
+      const [year, month] = monthKey.split('-');
+      grouped.set(monthKey, {
+        monthKey,
+        label: new Date(Number(year), Number(month) - 1, 1).toLocaleDateString('he-IL', { year: 'numeric', month: 'long' }),
+        workouts: 0,
+        spent: 0,
+        added: 0
+      });
+    }
+
+    const target = grouped.get(monthKey);
+    if (entry.type === 'workout_done') {
+      target.workouts += 1;
+      target.spent += Math.abs(Number(entry.amount) || 0);
+    }
+    if ((Number(entry.amount) || 0) > 0) {
+      target.added += Number(entry.amount) || 0;
+    }
+  });
+
+  return Array.from(grouped.values()).sort((left, right) => right.monthKey.localeCompare(left.monthKey));
+}
+
+function openEditEntryFromButton(button) {
+  openEditEntry(
+    button.dataset.entryId,
+    button.dataset.entryTitle || '',
+    Number(button.dataset.entryAmount) || 0,
+    button.dataset.entryNote || ''
+  );
+}
+
+function openEditEntry(entryId, entryTitle, entryAmount, entryNote) {
+  const entry = state.logs.find(item => item.id === entryId);
+  if (!entry) return;
+
+  _editingEntryId = entryId;
+  document.getElementById('edit-entry-title').value = entryTitle || entry.title || '';
+  const amountInput = document.getElementById('edit-entry-amount');
+  amountInput.value = Number.isFinite(entryAmount) ? entryAmount : (Number(entry.amount) || 0);
+  amountInput.disabled = isZeroAmountEntry(entry);
+  document.getElementById('edit-entry-note').value = entryNote || entry.note || '';
+  showSubScreen('edit-entry', true);
+}
+
+function saveEditedEntry() {
+  if (!_editingEntryId) return;
+
+  const entry = state.logs.find(item => item.id === _editingEntryId);
+  if (!entry) return;
+
+  const titleInput = document.getElementById('edit-entry-title');
+  const amountInput = document.getElementById('edit-entry-amount');
+  const noteInput = document.getElementById('edit-entry-note');
+  const parsedAmount = parseFloat(amountInput.value);
+  const nextAmount = amountInput.disabled ? Number(entry.amount) || 0 : normalizeEntryAmount(entry.type, parsedAmount);
+
+  if (!titleInput.value.trim() || Number.isNaN(nextAmount)) {
+    showToast('יש למלא כותרת וסכום תקין', 'error');
+    return;
+  }
+
+  const before = {
+    title: entry.title,
+    amount: entry.amount,
+    note: entry.note
+  };
+
+  entry.title = titleInput.value.trim();
+  entry.amount = nextAmount;
+  entry.note = noteInput.value.trim();
+
+  recalculateStateFromLogs();
+
+  addLogEntry({
+    type: 'journal_edited',
+    title: 'נערכה רשומה ביומן',
+    amount: 0,
+    balanceAfter: state.balance,
+    note: `"${before.title}" עודכנה: ₪${formatNum(before.amount)} -> ₪${formatNum(nextAmount)}`
+  });
+
+  recalculateStateFromLogs();
+  saveState();
+  refreshAllUI();
+  hideSubScreen();
+  showToast('הרשומה עודכנה', 'success');
+}
+
+function deleteEditedEntry() {
+  if (!_editingEntryId) return;
+
+  const entry = state.logs.find(item => item.id === _editingEntryId);
+  if (!entry) return;
+
+  showConfirm(
+    'מחיקת רשומה',
+    'הרשומה תימחק מהיומן. פעולת המחיקה עצמה תישמר ביומן הבקרה.',
+    () => {
+      const removedEntry = { ...entry };
+      state.logs = state.logs.filter(item => item.id !== _editingEntryId);
+      recalculateStateFromLogs();
+      addLogEntry({
+        type: 'journal_deleted',
+        title: 'נמחקה רשומה מהיומן',
+        amount: 0,
+        balanceAfter: state.balance,
+        note: `נמחקה הרשומה "${removedEntry.title}" בסכום ₪${formatNum(Math.abs(Number(removedEntry.amount) || 0))}`
+      });
+      recalculateStateFromLogs();
+      saveState();
+      refreshAllUI();
+      hideSubScreen();
+      showToast('הרשומה נמחקה', 'warning');
+    }
+  );
+}
+
+function recalculateStateFromLogs() {
+  let runningBalance = 0;
+  let workoutCount = 0;
+  const ordered = [...state.logs].reverse();
+
+  ordered.forEach(entry => {
+    entry.monthKey = deriveMonthKeyFromDate(entry.date);
+    runningBalance += Number(entry.amount) || 0;
+    entry.balanceAfter = runningBalance;
+    if (entry.type === 'workout_done') {
+      workoutCount += 1;
+    }
+  });
+
+  state.balance = runningBalance;
+  state.totalWorkouts = workoutCount;
+}
+
+function isZeroAmountEntry(entry) {
+  return ['reminder', 'journal_edited', 'price_changed'].includes(entry.type) || (Number(entry.amount) || 0) === 0;
+}
+
+function normalizeEntryAmount(type, amount) {
+  if (Number.isNaN(amount)) return amount;
+  if (type === 'workout_done') return -Math.abs(amount);
+  if (type === 'money_added') return Math.abs(amount);
+  if (['reminder', 'journal_edited', 'price_changed'].includes(type)) return 0;
+  return amount;
+}
+
+function deriveMonthKeyFromDate(dateStr) {
+  if (typeof dateStr !== 'string') {
+    return `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+  }
+
+  const parts = dateStr.split(/[./-]/).map(part => part.trim());
+  if (parts.length !== 3) {
+    return `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+  }
+
+  const [day, month, year] = parts;
+  return `${year}-${String(month).padStart(2, '0')}`;
 }
 
 // ============================================================
@@ -671,10 +1031,12 @@ function renderSettings() {
   const priceInput = document.getElementById('price-input');
   const timeInput  = document.getElementById('reminder-time-input');
   const toggle     = document.getElementById('notifications-toggle');
+  const themeToggle = document.getElementById('theme-toggle');
 
   if (priceInput) priceInput.value = state.workoutPrice;
   if (timeInput)  timeInput.value  = state.reminderTime;
   if (toggle)     toggle.checked   = state.notificationsEnabled;
+  if (themeToggle) themeToggle.checked = (state.theme || 'light') === 'dark';
 
   // הודעת iOS
   const iosNotice = document.getElementById('ios-pwa-notice');
@@ -682,7 +1044,26 @@ function renderSettings() {
 
   updateNotificationStatus();
   updateReminderStatus();
+  updateNotificationLimitations();
   updateCloudSyncStatus();
+}
+
+function applyTheme(theme) {
+  const normalizedTheme = theme === 'dark' ? 'dark' : 'light';
+  state.theme = normalizedTheme;
+  document.documentElement.setAttribute('data-theme', normalizedTheme);
+  const themeMeta = document.getElementById('theme-color-meta');
+  if (themeMeta) {
+    themeMeta.setAttribute('content', THEME_META_COLORS[normalizedTheme]);
+  }
+}
+
+function toggleThemeSetting() {
+  const themeToggle = document.getElementById('theme-toggle');
+  const nextTheme = themeToggle?.checked ? 'dark' : 'light';
+  applyTheme(nextTheme);
+  saveState();
+  showToast(nextTheme === 'dark' ? 'מצב לילה הופעל' : 'מצב בהיר הופעל', 'success');
 }
 
 // ============================================================
@@ -755,8 +1136,10 @@ function importData(event) {
       }
 
       state = { ...DEFAULT_STATE, ...imported };
+      recalculateStateFromLogs();
+      applyTheme(state.theme || 'light');
       saveState();
-      updateHomeUI();
+      refreshAllUI();
       showToast('גיבוי יובא בהצלחה 📥', 'success');
     } catch {
       showToast('שגיאה בייבוא הגיבוי', 'error');
@@ -777,8 +1160,9 @@ function resetData() {
     () => {
       state = { ...DEFAULT_STATE };
       localStorage.removeItem('_last-reminder');
+      applyTheme(state.theme);
       saveState();
-      updateHomeUI();
+      refreshAllUI();
       showScreen('home');
       showToast('כל הנתונים אופסו', 'warning');
     }
@@ -1008,6 +1392,13 @@ function setupKeyboardHandlers() {
     ?.addEventListener('keydown', e => { if (e.key === 'Enter') setBalance(); });
   document.getElementById('set-balance-note')
     ?.addEventListener('keydown', e => { if (e.key === 'Enter') setBalance(); });
+
+  document.getElementById('edit-entry-title')
+    ?.addEventListener('keydown', e => { if (e.key === 'Enter') saveEditedEntry(); });
+  document.getElementById('edit-entry-amount')
+    ?.addEventListener('keydown', e => { if (e.key === 'Enter') saveEditedEntry(); });
+  document.getElementById('edit-entry-note')
+    ?.addEventListener('keydown', e => { if (e.key === 'Enter') saveEditedEntry(); });
 }
 
 // ============================================================
@@ -1016,9 +1407,11 @@ function setupKeyboardHandlers() {
 async function init() {
   // טוען state מהשרת (עם fallback ללוקאלי)
   await hydrateState();
+  recalculateStateFromLogs();
+  applyTheme(state.theme || 'light');
 
   // עדכון UI ראשוני
-  updateHomeUI();
+  refreshAllUI();
 
   // apple-touch-icon דינמי
   try {
@@ -1037,6 +1430,15 @@ async function init() {
 
   // מקשי Enter
   setupKeyboardHandlers();
+
+  // רענון במשיכה על מסך הבית
+  setupPullToRefresh();
+
+  // בדיקה חוזרת כשחוזרים לאפליקציה
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) checkReminder();
+  });
+  window.addEventListener('focus', checkReminder);
 
 }
 

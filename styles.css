@@ -12,7 +12,24 @@
   --text:    #000000;
   --text-sec:#6C6C70;
   --border:  #C6C6C8;
+  --surface: rgba(248, 248, 248, 0.94);
+  --shadow-strong: rgba(0,0,0,0.08);
   --nav-h:   60px;
+}
+
+:root[data-theme='dark'] {
+  --blue:    #5AA9FF;
+  --green:   #4CD47B;
+  --red:     #FF6B63;
+  --orange:  #FFB24D;
+  --gray:    #A1A1AA;
+  --bg:      #0B1220;
+  --card-bg: #111827;
+  --text:    #F8FAFC;
+  --text-sec:#94A3B8;
+  --border:  #243041;
+  --surface: rgba(11, 18, 32, 0.9);
+  --shadow-strong: rgba(0,0,0,0.28);
 }
 
 /* ===========================
@@ -116,7 +133,7 @@ body {
   border-radius: 16px;
   padding: 20px;
   margin: 8px 0;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+  box-shadow: 0 2px 10px var(--shadow-strong);
 }
 
 /* כרטיס יתרה – גרדיאנט כחול */
@@ -167,7 +184,7 @@ body {
   border-radius: 14px;
   padding: 16px 12px;
   text-align: center;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+  box-shadow: 0 2px 8px var(--shadow-strong);
 }
 
 .stat-value {
@@ -194,7 +211,7 @@ body {
   font-size: 14px;
   color: var(--text-sec);
   text-align: center;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+  box-shadow: 0 1px 4px var(--shadow-strong);
   line-height: 1.5;
 }
 
@@ -202,6 +219,12 @@ body {
   background: #FFFBE6;
   color: #8A6000;
   border: 1px solid #FFE082;
+}
+
+:root[data-theme='dark'] .summary-card.warning {
+  background: rgba(255, 178, 77, 0.12);
+  color: #FFD89A;
+  border-color: rgba(255, 178, 77, 0.35);
 }
 
 /* ===========================
@@ -326,6 +349,12 @@ body {
   transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
 }
 
+.edit-entry-actions-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
 /* כאשר מוצג – שורה נוספת */
 .sub-screen.active .sub-screen-content {
   transform: translateY(0);
@@ -395,6 +424,37 @@ body {
 
 .form-input:focus { border-color: var(--blue); }
 
+.pull-refresh-indicator {
+  margin: 0 auto 10px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(0, 122, 255, 0.08);
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease;
+  pointer-events: none;
+}
+
+.pull-refresh-indicator.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.pull-refresh-indicator.ready {
+  background: rgba(52, 199, 89, 0.12);
+  color: var(--green);
+}
+
+.pull-refresh-indicator.refreshing {
+  background: rgba(255, 149, 0, 0.12);
+  color: #C77700;
+}
+
 /* ===========================
    לוג פעולות
    =========================== */
@@ -413,7 +473,7 @@ body {
   border-radius: 14px;
   overflow: hidden;
   margin-bottom: 20px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  box-shadow: 0 2px 8px var(--shadow-strong);
 }
 
 .log-entry {
@@ -456,12 +516,44 @@ body {
   font-size: 12px;
   color: var(--text-sec);
   margin-top: 3px;
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 6px;
+  justify-items: start;
 }
 
-.log-note { color: var(--gray); font-style: italic; }
+.log-entry-datetime {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  direction: rtl;
+}
+
+.journal-entry-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.journal-edit-btn {
+  border: none;
+  background: #EEF4FF;
+  color: var(--blue);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.log-note {
+  color: var(--gray);
+  font-style: normal;
+  direction: rtl;
+  text-align: right;
+  unicode-bidi: plaintext;
+}
 
 .log-entry-amounts {
   text-align: left;
@@ -508,6 +600,70 @@ body {
   line-height: 1.5;
 }
 
+.summary-month-card {
+  background: var(--card-bg);
+  border-radius: 18px;
+  padding: 18px;
+  margin-bottom: 14px;
+  box-shadow: 0 2px 8px var(--shadow-strong);
+}
+
+.summary-month-card.current {
+  background: linear-gradient(135deg, #F4FAFF 0%, #FFFFFF 100%);
+  border: 1px solid #D9EBFF;
+}
+
+:root[data-theme='dark'] .summary-month-card.current {
+  background: linear-gradient(135deg, rgba(90, 169, 255, 0.14) 0%, rgba(17, 24, 39, 1) 100%);
+  border-color: rgba(90, 169, 255, 0.25);
+}
+
+.summary-month-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.summary-month-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.summary-month-badge {
+  background: #EEF4FF;
+  color: var(--blue);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.summary-stat {
+  background: var(--bg);
+  border-radius: 14px;
+  padding: 14px 10px;
+  text-align: center;
+}
+
+.summary-stat-value {
+  font-size: 18px;
+  font-weight: 800;
+  margin-bottom: 4px;
+}
+
+.summary-stat-label {
+  font-size: 12px;
+  color: var(--text-sec);
+}
+
 /* ===========================
    הגדרות
    =========================== */
@@ -529,10 +685,12 @@ body {
   background: var(--card-bg);
   border-radius: 14px;
   padding: 6px 16px 16px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  box-shadow: 0 2px 8px var(--shadow-strong);
 }
 
 .danger-card { background: #FFF5F5; }
+
+:root[data-theme='dark'] .danger-card { background: rgba(255, 107, 99, 0.08); }
 
 .settings-row {
   display: flex;
@@ -634,6 +792,11 @@ body {
   background: #F0F8FF;
   border: 1px solid #BFDBFE;
   padding: 16px;
+}
+
+:root[data-theme='dark'] .info-card {
+  background: rgba(90, 169, 255, 0.1);
+  border-color: rgba(90, 169, 255, 0.3);
 }
 
 .info-icon { font-size: 22px; margin-bottom: 8px; }
@@ -752,7 +915,7 @@ body {
   max-width: 480px;
   margin: 0 auto;
   display: flex;
-  background: rgba(248, 248, 248, 0.94);
+  background: var(--surface);
   border-top: 1px solid var(--border);
   padding-bottom: env(safe-area-inset-bottom);
   backdrop-filter: blur(20px);
@@ -782,6 +945,20 @@ body {
 
 .nav-icon { font-size: 22px; }
 .nav-label { font-size: 10px; font-weight: 600; letter-spacing: 0.2px; }
+
+@media (max-width: 380px) {
+  .edit-entry-actions-row {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .nav-label {
+    font-size: 11px;
+  }
+}
 
 /* ===========================
    עיצוב דסקטופ

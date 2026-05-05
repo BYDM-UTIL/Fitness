@@ -3,7 +3,7 @@
 //  אסטרטגיה: Cache-First עם עדכון ברקע
 // ============================================================
 
-const CACHE_NAME = 'fitness-tracker-v2';
+const CACHE_NAME = 'fitness-tracker-v3';
 
 // קבצים לשמירה במטמון
 const ASSETS = [
@@ -92,22 +92,37 @@ self.addEventListener('fetch', event => {
   );
 });
 
-// ===== Push Notifications (הכנה לעתיד – FCM) =====
-// TODO: לחבר Firebase Cloud Messaging בעתיד
-// self.addEventListener('push', event => {
-//   const data = event.data?.json() ?? {};
-//   event.waitUntil(
-//     self.registration.showNotification(data.title || 'כושר', {
-//       body: data.body || 'תזכורת יומית 🏋️',
-//       icon: './icons/icon.svg',
-//       badge: './icons/icon.svg',
-//       dir: 'rtl',
-//       lang: 'he',
-//     })
-//   );
-// });
+// ===== Push Notifications =====
+// מוכן גם להתראות שנשלחות מקומית דרך registration.showNotification
+self.addEventListener('push', event => {
+  const data = event.data?.json() ?? {};
+  event.waitUntil(
+    self.registration.showNotification(data.title || 'כושר', {
+      body: data.body || 'תזכורת יומית 🏋️',
+      icon: './icons/icon.svg',
+      badge: './icons/icon.svg',
+      dir: 'rtl',
+      lang: 'he',
+      tag: data.tag || 'fitness-push-reminder',
+      renotify: true,
+    })
+  );
+});
 
-// self.addEventListener('notificationclick', event => {
-//   event.notification.close();
-//   event.waitUntil(clients.openWindow('/'));
-// });
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
+      const existingClient = clientList.find(client => 'focus' in client);
+      if (existingClient) {
+        return existingClient.focus();
+      }
+
+      if (clients.openWindow) {
+        return clients.openWindow('./');
+      }
+
+      return undefined;
+    })
+  );
+});

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#007AFF">
+  <meta id="theme-color-meta" name="theme-color" content="#007AFF">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="כושר">
@@ -22,6 +22,7 @@
   <div id="screen-home" class="screen active">
     <div class="safe-top"></div>
     <div class="screen-content">
+      <div id="pull-refresh-indicator" class="pull-refresh-indicator">משוך למטה כדי לרענן</div>
       <div class="header">
         <div class="app-title">כושר 💪</div>
         <div class="app-subtitle">מעקב אימונים ותשלומים</div>
@@ -68,14 +69,27 @@
     </div>
   </div>
 
-  <!-- ===== מסך לוג ===== -->
-  <div id="screen-log" class="screen">
+  <!-- ===== מסך יומן ===== -->
+  <div id="screen-journal" class="screen">
     <div class="safe-top"></div>
     <div class="screen-content">
       <div class="header">
-        <div class="screen-title">לוג פעולות</div>
+        <div class="screen-title">יומן פעולות</div>
       </div>
-      <div id="log-container">
+      <div id="journal-container">
+        <!-- יוצג דינמית -->
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== מסך סיכום חודשי ===== -->
+  <div id="screen-summary" class="screen">
+    <div class="safe-top"></div>
+    <div class="screen-content">
+      <div class="header">
+        <div class="screen-title">סיכום חודשי</div>
+      </div>
+      <div id="monthly-summary-container">
         <!-- יוצג דינמית -->
       </div>
     </div>
@@ -133,8 +147,29 @@
             </div>
           </div>
           <button class="btn btn-primary btn-sm" onclick="saveNotificationSettings()">שמור הגדרות</button>
+          <div style="height:10px"></div>
+          <button class="btn btn-secondary btn-sm" onclick="sendTestReminder()">שלח תזכורת לבדיקה</button>
           <div id="notification-status" class="notification-status"></div>
           <div id="reminder-status" class="notification-status"></div>
+          <div id="notification-limitations" class="notification-status"></div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">תצוגה</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-row-label">
+              <span class="settings-icon">🌙</span>
+              <span>מצב לילה</span>
+            </div>
+            <div class="settings-row-value">
+              <label class="toggle" role="switch" aria-label="מצב לילה">
+                <input type="checkbox" id="theme-toggle" onchange="toggleThemeSetting()">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -148,7 +183,7 @@
           <p>2. לחץ על כפתור השיתוף <strong>⬆️</strong></p>
           <p>3. בחר <strong>"הוסף למסך הבית"</strong></p>
           <p style="margin-top:8px; color:#666; font-size:13px;">
-            לאחר ההתקנה, התראות אינן נתמכות ב-iOS. יוצגו תזכורות בתוך האפליקציה.
+            לאחר ההתקנה אפשר לקבל התראות, אבל ברקע אמיתי iPhone עדיין עשוי להשהות את האפליקציה. לכן תזכורת מקומית לא תמיד תופיע כשהמכשיר נעול או כשהאפליקציה הושהתה.
           </p>
         </div>
       </div>
@@ -183,7 +218,7 @@
         </div>
       </div>
 
-      <div class="app-version">גרסה 1.0.0</div>
+      <div class="app-version">גרסה 1.1.0</div>
     </div>
   </div>
 
@@ -206,6 +241,38 @@
         <span class="btn-icon">💰</span>
         <span>הוסף לקופה</span>
       </button>
+    </div>
+  </div>
+
+  <!-- ===== שכבת-על: עריכת רשומה ביומן ===== -->
+  <div id="sub-screen-edit-entry" class="sub-screen" style="display:none;" onclick="handleSubScreenOverlayClick(event)">
+    <div class="sub-screen-content" onclick="event.stopPropagation()">
+      <div class="sub-screen-header">
+        <button class="back-btn" onclick="hideSubScreen()" aria-label="סגור">✕</button>
+        <h2>עריכת רשומה ביומן</h2>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="edit-entry-title">כותרת</label>
+        <input type="text" id="edit-entry-title" class="form-input" placeholder="כותרת הרשומה">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="edit-entry-amount">סכום</label>
+        <input type="number" id="edit-entry-amount" class="form-input" placeholder="0" step="1" inputmode="decimal">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="edit-entry-note">הערה</label>
+        <input type="text" id="edit-entry-note" class="form-input" placeholder="הערה לעריכה">
+      </div>
+      <div class="edit-entry-actions-row">
+        <button class="btn btn-danger btn-full" onclick="deleteEditedEntry()">
+          <span class="btn-icon">🗑️</span>
+          <span>מחק רשומה</span>
+        </button>
+        <button class="btn btn-primary btn-full" onclick="saveEditedEntry()">
+          <span class="btn-icon">✏️</span>
+          <span>שמור שינויים</span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -233,9 +300,13 @@
       <span class="nav-icon">🏠</span>
       <span class="nav-label">בית</span>
     </button>
-    <button class="nav-btn" onclick="showScreen('log')" data-screen="log" aria-label="לוג">
+    <button class="nav-btn" onclick="showScreen('journal')" data-screen="journal" aria-label="יומן">
       <span class="nav-icon">📋</span>
-      <span class="nav-label">לוג</span>
+      <span class="nav-label">יומן</span>
+    </button>
+    <button class="nav-btn" onclick="showScreen('summary')" data-screen="summary" aria-label="סיכום חודשי">
+      <span class="nav-icon">📆</span>
+      <span class="nav-label">חודשי</span>
     </button>
     <button class="nav-btn" onclick="showScreen('settings')" data-screen="settings" aria-label="הגדרות">
       <span class="nav-icon">⚙️</span>
