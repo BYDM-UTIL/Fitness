@@ -2,3 +2,4 @@ node_modules/
 fitness.db
 fitness.db-*
 npm-debug.log*
+.firebase/

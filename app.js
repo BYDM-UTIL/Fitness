@@ -4,7 +4,7 @@
 //  קבועים ומפתח localStorage
 // ============================================================
 const STORAGE_KEY = 'fitness-tracker-v1';
-const API_BASE_URL = window.FITNESS_API_BASE_URL || '';
+const FIREBASE_CONFIG = window.FIREBASE_CONFIG || null;
 
 const DEFAULT_STATE = {
   balance: 0,
@@ -19,10 +19,55 @@ const DEFAULT_STATE = {
 //  ניהול state
 // ============================================================
 let state = { ...DEFAULT_STATE };
+let _cloudReady = false;
+let _firebaseDb = null;
+let _firebaseUid = null;
 
 /** טוען את המצב מה-localStorage, ממזג עם ברירות מחדל */
 function loadState() {
   return loadStateFromLocalStorage();
+}
+
+function hasUsableFirebaseConfig() {
+  if (!FIREBASE_CONFIG || typeof FIREBASE_CONFIG !== 'object') return false;
+
+  const required = ['apiKey', 'authDomain', 'projectId', 'appId'];
+  return required.every(key => {
+    const value = FIREBASE_CONFIG[key];
+    return typeof value === 'string' && value.trim() && !value.includes('REPLACE_');
+  });
+}
+
+async function initFirebaseCloud() {
+  if (_cloudReady) return true;
+  if (!window.firebase || !hasUsableFirebaseConfig()) return false;
+
+  try {
+    if (!firebase.apps.length) {
+      firebase.initializeApp(FIREBASE_CONFIG);
+    }
+
+    const auth = firebase.auth();
+    if (!auth.currentUser) {
+      await auth.signInAnonymously();
+    }
+
+    _firebaseDb = firebase.firestore();
+    _firebaseUid = auth.currentUser && auth.currentUser.uid;
+    _cloudReady = Boolean(_firebaseDb && _firebaseUid);
+    return _cloudReady;
+  } catch (e) {
+    console.warn('[FitnessTracker] Firebase init failed:', e);
+    _cloudReady = false;
+    return false;
+  }
+}
+
+function getCloudDocRef() {
+  if (!_cloudReady || !_firebaseDb || !_firebaseUid) {
+    throw new Error('Firebase cloud is not ready');
+  }
+  return _firebaseDb.collection('fitnessStates').doc(_firebaseUid);
 }
 
 function loadStateFromLocalStorage() {
@@ -49,39 +94,41 @@ function saveStateToLocalStorage() {
   }
 }
 
-async function loadStateFromServer() {
-  const res = await fetch(`${API_BASE_URL}/api/state`, {
-    method: 'GET',
-    headers: { 'Accept': 'application/json' },
-    cache: 'no-store'
-  });
+async function loadStateFromCloud() {
+  const ref = getCloudDocRef();
+  const snap = await ref.get();
 
-  if (!res.ok) {
-    throw new Error(`Server load failed: ${res.status}`);
+  if (!snap.exists) {
+    return null;
   }
 
-  const payload = await res.json();
+  const payload = snap.data();
   if (!payload || typeof payload !== 'object' || !payload.state) {
-    throw new Error('Server returned invalid payload');
+    return null;
   }
   return { ...DEFAULT_STATE, ...payload.state };
 }
 
 async function saveState() {
-  // שמירה מיידית ל-localStorage כגיבוי, ואז sync לשרת
+  // שמירה מיידית ל-localStorage כגיבוי, ואז sync לענן
   saveStateToLocalStorage();
 
   try {
-    const res = await fetch(`${API_BASE_URL}/api/state`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state })
-    });
-    if (!res.ok) {
-      throw new Error(`Server save failed: ${res.status}`);
+    const cloudOk = await initFirebaseCloud();
+    if (!cloudOk) {
+      return;
     }
+
+    const ref = getCloudDocRef();
+    await ref.set(
+      {
+        state,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
   } catch (e) {
-    console.warn('[FitnessTracker] saveState server sync failed:', e);
+    console.warn('[FitnessTracker] saveState cloud sync failed:', e);
   }
 }
 
@@ -90,11 +137,22 @@ async function hydrateState() {
   state = localState;
 
   try {
-    const serverState = await loadStateFromServer();
-    state = serverState;
-    saveStateToLocalStorage();
+    const cloudOk = await initFirebaseCloud();
+    if (!cloudOk) {
+      return;
+    }
+
+    const cloudState = await loadStateFromCloud();
+    if (cloudState) {
+      state = cloudState;
+      saveStateToLocalStorage();
+      return;
+    }
+
+    // מסנכרן לענן את ה-state המקומי הקיים בהרצה ראשונה
+    await saveState();
   } catch (e) {
-    console.warn('[FitnessTracker] using local state (server unavailable):', e);
+    console.warn('[FitnessTracker] using local state (cloud unavailable):', e);
   }
 }
 

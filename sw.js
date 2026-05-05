@@ -3,7 +3,7 @@
 //  אסטרטגיה: Cache-First עם עדכון ברקע
 // ============================================================
 
-const CACHE_NAME = 'fitness-tracker-v1';
+const CACHE_NAME = 'fitness-tracker-v2';
 
 // קבצים לשמירה במטמון
 const ASSETS = [
@@ -11,6 +11,7 @@ const ASSETS = [
   './index.html',
   './styles.css',
   './app.js',
+  './firebase-config.js',
   './manifest.webmanifest',
   './icons/icon.svg',
 ];
