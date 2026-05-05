@@ -22,6 +22,7 @@ let state = { ...DEFAULT_STATE };
 let _cloudReady = false;
 let _firebaseDb = null;
 let _firebaseUid = null;
+let _lastCloudSyncAt = null;
 
 /** טוען את המצב מה-localStorage, ממזג עם ברירות מחדל */
 function loadState() {
@@ -106,7 +107,15 @@ async function loadStateFromCloud() {
   if (!payload || typeof payload !== 'object' || !payload.state) {
     return null;
   }
-  return { ...DEFAULT_STATE, ...payload.state };
+
+  const updatedAt = payload.updatedAt && typeof payload.updatedAt.toDate === 'function'
+    ? payload.updatedAt.toDate()
+    : null;
+
+  return {
+    state: { ...DEFAULT_STATE, ...payload.state },
+    updatedAt
+  };
 }
 
 async function saveState() {
@@ -127,8 +136,12 @@ async function saveState() {
       },
       { merge: true }
     );
+
+    _lastCloudSyncAt = new Date();
+    updateCloudSyncStatus();
   } catch (e) {
     console.warn('[FitnessTracker] saveState cloud sync failed:', e);
+    updateCloudSyncStatus('שגיאת סנכרון לענן (הנתונים נשמרו מקומית)');
   }
 }
 
@@ -139,13 +152,16 @@ async function hydrateState() {
   try {
     const cloudOk = await initFirebaseCloud();
     if (!cloudOk) {
+      updateCloudSyncStatus('עובד במצב מקומי בלבד (אין חיבור לענן)');
       return;
     }
 
-    const cloudState = await loadStateFromCloud();
-    if (cloudState) {
-      state = cloudState;
+    const cloudPayload = await loadStateFromCloud();
+    if (cloudPayload) {
+      state = cloudPayload.state;
+      _lastCloudSyncAt = cloudPayload.updatedAt;
       saveStateToLocalStorage();
+      updateCloudSyncStatus();
       return;
     }
 
@@ -153,7 +169,30 @@ async function hydrateState() {
     await saveState();
   } catch (e) {
     console.warn('[FitnessTracker] using local state (cloud unavailable):', e);
+    updateCloudSyncStatus('עובד במצב מקומי בלבד (אין חיבור לענן)');
   }
+}
+
+function updateCloudSyncStatus(message) {
+  const el = document.getElementById('cloud-sync-status');
+  if (!el) return;
+
+  if (message) {
+    el.textContent = message;
+    return;
+  }
+
+  if (!_cloudReady) {
+    el.textContent = 'ענן: לא מחובר';
+    return;
+  }
+
+  if (_lastCloudSyncAt instanceof Date && !isNaN(_lastCloudSyncAt)) {
+    el.textContent = `סנכרון אחרון לענן: ${formatDateTime(_lastCloudSyncAt)}`;
+    return;
+  }
+
+  el.textContent = 'סנכרון לענן פעיל';
 }
 
 // ============================================================
@@ -592,6 +631,7 @@ function renderSettings() {
   if (iosNotice) iosNotice.style.display = isIOS() ? 'block' : 'none';
 
   updateNotificationStatus();
+  updateCloudSyncStatus();
 }
 
 // ============================================================
@@ -867,6 +907,17 @@ function _fillRoundRect(ctx, x, y, w, h, r) {
 function formatNum(n) {
   if (typeof n !== 'number' || isNaN(n)) return '0';
   return Math.round(n).toLocaleString('he-IL');
+}
+
+function formatDateTime(date) {
+  if (!(date instanceof Date) || isNaN(date)) return '-';
+  return date.toLocaleString('he-IL', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
 }
 
 /** מגן מפני XSS */
