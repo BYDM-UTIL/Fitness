@@ -1,757 +1,851 @@
 'use strict';
 
 // ============================================================
-//  קבועים ומפתח localStorage
+//  קבועים
 // ============================================================
-const STORAGE_KEY = 'fitness-tracker-v1';
+const STORAGE_KEY   = 'fitness-tracker-v1';
 const FIREBASE_CONFIG = window.FIREBASE_CONFIG || null;
-
-const DEFAULT_STATE = {
-  balance: 0,
-  workoutPrice: 80,
-  reminderTime: '09:00',
-  notificationsEnabled: false,
-  theme: 'light',
-  totalWorkouts: 0,
-  logs: [],
-  lastReminderAt: null,
-  lastReminderDateKey: ''
-};
-
-// ============================================================
-//  ניהול state
-// ============================================================
-let state = { ...DEFAULT_STATE };
-let _cloudReady = false;
-let _firebaseDb = null;
-let _firebaseUid = null;
-let _firebaseMessaging = null;
-let _fcmToken = '';
-let _swRegistration = null;
-let _lastCloudSyncAt = null;
-let _cloudInitError = '';
-let _editingEntryId = null;
-let _isPullRefreshing = false;
+const SHARED_PROFILE_ID = 'main-profile';
 
 const THEME_META_COLORS = {
   light: '#007AFF',
-  dark: '#0F172A'
+  dark:  '#0F172A'
 };
 
-/** טוען את המצב מה-localStorage, ממזג עם ברירות מחדל */
-function loadState() {
-  return loadStateFromLocalStorage();
-}
+// ============================================================
+//  מצב אפליקציה
+// ============================================================
+let state = {
+  balance:       0,
+  workoutPrice:  80,
+  totalWorkouts: 0,
+  logs:          [],      // cache מקומי בלבד
+  theme:         'light',
+  todayReport:   null     // { type: 'workout_done'|'no_workout', logId, date }
+};
 
+let _cloudReady       = false;
+let _firebaseDb       = null;
+let _firebaseUid      = null;
+let _lastCloudSyncAt  = null;
+let _cloudInitError   = '';
+let _lastCloudError   = '';
+let _editingEntryId   = null;
+let _isPullRefreshing = false;
+let _workoutLocked    = false;
+let _isHydrating      = false;
+let _cloudProfileUnsub = null;
+let _cloudLogsUnsub    = null;
+let _cloudTodayUnsub   = null;
+let _realtimeReady     = false;
+
+// ============================================================
+//  Firebase init
+// ============================================================
 function hasUsableFirebaseConfig() {
   if (!FIREBASE_CONFIG || typeof FIREBASE_CONFIG !== 'object') return false;
-
   const required = ['apiKey', 'authDomain', 'projectId', 'appId'];
-  return required.every(key => {
-    const value = FIREBASE_CONFIG[key];
-    return typeof value === 'string' && value.trim() && !value.includes('REPLACE_');
+  return required.every(k => {
+    const v = FIREBASE_CONFIG[k];
+    return typeof v === 'string' && v.trim() && !v.includes('REPLACE_');
   });
-}
-
-function hasUsableVapidKey() {
-  const key = FIREBASE_CONFIG && FIREBASE_CONFIG.vapidKey;
-  return typeof key === 'string' && key.trim() && !key.includes('REPLACE_');
-}
-
-function canUseCloudPush() {
-  return Boolean(
-    window.isSecureContext &&
-    'serviceWorker' in navigator &&
-    'PushManager' in window &&
-    window.firebase &&
-    typeof firebase.messaging === 'function'
-  );
 }
 
 async function initFirebaseCloud() {
   if (_cloudReady) return true;
-  if (!window.firebase) {
-    _cloudInitError = 'Firebase SDK לא נטען (ייתכן חסימת רשת ארגונית)';
-    return false;
-  }
-  if (!hasUsableFirebaseConfig()) {
-    _cloudInitError = 'הגדרת Firebase חסרה או לא תקינה';
-    return false;
-  }
-
+  if (!window.firebase) { _cloudInitError = 'Firebase SDK לא נטען'; return false; }
+  if (!hasUsableFirebaseConfig()) { _cloudInitError = 'הגדרת Firebase חסרה'; return false; }
   try {
-    if (!firebase.apps.length) {
-      firebase.initializeApp(FIREBASE_CONFIG);
+    if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    _firebaseDb  = firebase.firestore();
+    try {
+      const auth = firebase.auth();
+      if (!auth.currentUser) await auth.signInAnonymously();
+      _firebaseUid = auth.currentUser && auth.currentUser.uid;
+    } catch (authError) {
+      console.warn('[Fitness] Anonymous auth unavailable, continuing with shared public profile:', authError);
+      _firebaseUid = null;
     }
-
-    const auth = firebase.auth();
-    if (!auth.currentUser) {
-      await auth.signInAnonymously();
-    }
-
-    _firebaseDb = firebase.firestore();
-    _firebaseUid = auth.currentUser && auth.currentUser.uid;
-    _cloudReady = Boolean(_firebaseDb && _firebaseUid);
+    _cloudReady  = Boolean(_firebaseDb);
     _cloudInitError = '';
     return _cloudReady;
   } catch (e) {
-    console.warn('[FitnessTracker] Firebase init failed:', e);
+    console.warn('[Fitness] Firebase init failed:', e);
     _cloudReady = false;
     _cloudInitError = formatCloudError(e);
     return false;
   }
 }
 
-async function initFirebaseMessaging() {
-  if (_firebaseMessaging) return _firebaseMessaging;
-  if (!canUseCloudPush()) return null;
-  if (!hasUsableVapidKey()) return null;
-
-  try {
-    if (!firebase.apps.length) {
-      firebase.initializeApp(FIREBASE_CONFIG);
-    }
-    _firebaseMessaging = firebase.messaging();
-    return _firebaseMessaging;
-  } catch (e) {
-    console.warn('[FitnessTracker] Firebase messaging init failed:', e);
-    return null;
-  }
-}
-
-function formatCloudError(error) {
-  const raw = (error && (error.code || error.message)) ? `${error.code || ''} ${error.message || ''}` : '';
-
-  if (/api-key|api key|referrer|auth\/invalid-api-key/i.test(raw)) {
-    return 'מפתח Firebase חסום לדומיין הנוכחי (בדוק API key restrictions)';
-  }
-  if (/network|failed to fetch|offline/i.test(raw)) {
-    return 'אין גישה לשירותי Firebase מהרשת הנוכחית';
-  }
-  if (/auth\/operation-not-allowed/i.test(raw)) {
-    return 'Anonymous Sign-in כבוי ב-Firebase Authentication';
-  }
-  if (/auth\/configuration-not-found|configuration-not-found/i.test(raw)) {
-    return 'Firebase Authentication לא הוגדר בפרויקט (יש להפעיל Authentication + Anonymous)';
-  }
-
+function formatCloudError(e) {
+  const raw = `${e?.code || ''} ${e?.message || ''}`;
+  if (/api-key|referrer|invalid-api-key/i.test(raw))  return 'מפתח Firebase חסום לדומיין הנוכחי';
+  if (/network|failed to fetch|offline/i.test(raw))   return 'אין גישה לשירותי Firebase';
+  if (/operation-not-allowed/i.test(raw))              return 'Anonymous Sign-in כבוי ב-Firebase';
+  if (/configuration-not-found/i.test(raw))            return 'Firebase Authentication לא הוגדר';
   return 'שגיאה בהתחברות לענן';
 }
 
-function getCloudDocRef() {
-  if (!_cloudReady || !_firebaseDb || !_firebaseUid) {
-    throw new Error('Firebase cloud is not ready');
-  }
-  return _firebaseDb.collection('fitnessStates').doc(_firebaseUid);
+// ============================================================
+//  Firestore paths  (/users/{uid}/...)
+// ============================================================
+function getUserDocRef() {
+  if (!_cloudReady) throw new Error('Firebase not ready');
+  return _firebaseDb.collection('users').doc(SHARED_PROFILE_ID);
 }
 
-function loadStateFromLocalStorage() {
+function getPersonalUserDocRef() {
+  if (!_cloudReady) throw new Error('Firebase not ready');
+  if (!_firebaseUid) return null;
+  return _firebaseDb.collection('users').doc(_firebaseUid);
+}
+
+function getLogsColRef()          { return getUserDocRef().collection('logs');         }
+function getDailyReportRef(dk)    { return getUserDocRef().collection('dailyReports').doc(dk); }
+
+function todayDateKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// ============================================================
+//  localStorage (גיבוי בלבד)
+// ============================================================
+function saveToLocalStorage() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      balance:      state.balance,
+      workoutPrice: state.workoutPrice,
+      totalWorkouts:state.totalWorkouts,
+      logs:         state.logs,
+      theme:        state.theme,
+      todayReport:  state.todayReport
+    }));
+  } catch (e) { console.warn('[Fitness] localStorage save failed:', e); }
+}
+
+function loadFromLocalStorage() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw);
-      // ממזג עם ברירות מחדל כדי לתמוך בשדות חדשים
-      return { ...DEFAULT_STATE, ...parsed };
+      const p = JSON.parse(raw);
+      return {
+        balance:      typeof p.balance      === 'number' ? p.balance      : 0,
+        workoutPrice: typeof p.workoutPrice === 'number' ? p.workoutPrice : 80,
+        totalWorkouts:typeof p.totalWorkouts=== 'number' ? p.totalWorkouts: 0,
+        logs:         Array.isArray(p.logs) ? p.logs : [],
+        theme:        p.theme || 'light',
+        todayReport:  p.todayReport || null
+      };
     }
-  } catch (e) {
-    console.error('[FitnessTracker] loadState failed:', e);
-  }
-  return { ...DEFAULT_STATE };
+  } catch (e) { /* ignore */ }
+  return null;
 }
 
-/** שומר את המצב הנוכחי ב-localStorage */
-function saveStateToLocalStorage() {
+// ============================================================
+//  טעינה מהענן
+// ============================================================
+async function hydrateState() {
+  const local = loadFromLocalStorage();
+  _isHydrating = true;
+  setLoadingState(true, 'טוען נתונים מהענן...');
+
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    const ok = await initFirebaseCloud();
+    if (!ok) {
+      if (local) {
+        Object.assign(state, local);
+        refreshAllUI();
+      }
+      updateCloudSyncStatus('עובד במצב מקומי');
+      return false;
+    }
+
+    await ensureSharedProfileInitialized();
+
+    await withTimeout(fetchCloudSnapshotOnce(), 8000, 'טעינת ענן לקחה יותר מדי זמן');
+    startRealtimeSync();
+    _lastCloudError = '';
+    return true;
   } catch (e) {
-    console.error('[FitnessTracker] saveState failed:', e);
-    showToast('שגיאה בשמירת הנתונים', 'error');
+    console.warn('[Fitness] hydrateState failed:', e);
+    _lastCloudError = String(e?.message || e || 'שגיאת סנכרון');
+    if (local) {
+      Object.assign(state, local);
+      refreshAllUI();
+    }
+    updateCloudSyncStatus('שגיאת סנכרון – עובד מקומית');
+    return false;
+  } finally {
+    _isHydrating = false;
+    setLoadingState(false);
   }
 }
 
-async function loadStateFromCloud() {
-  const ref = getCloudDocRef();
-  const snap = await ref.get();
+async function fetchCloudSnapshotOnce() {
+  const [userSnap, logsSnap, todaySnap] = await Promise.all([
+    getUserDocRef().get(),
+    getLogsColRef().limit(500).get(),
+    getDailyReportRef(todayDateKey()).get()
+  ]);
 
-  if (!snap.exists) {
-    return null;
+  if (userSnap.exists) {
+    const data = userSnap.data() || {};
+    state.balance = typeof data.balance === 'number' ? data.balance : 0;
+    state.workoutPrice = typeof data.workoutPrice === 'number' ? data.workoutPrice : 80;
+    state.totalWorkouts = typeof data.totalWorkouts === 'number' ? data.totalWorkouts : 0;
+    state.theme = data.theme || 'light';
   }
 
-  const payload = snap.data();
-  if (!payload || typeof payload !== 'object' || !payload.state) {
-    return null;
+  state.logs = logsSnap.docs
+    .map(doc => ({ id: doc.id, ...doc.data() }))
+    .sort((left, right) => getLogSortValue(right) - getLogSortValue(left));
+
+  state.todayReport = todaySnap.exists ? { ...todaySnap.data(), docId: todaySnap.id } : null;
+
+  _lastCloudSyncAt = new Date();
+  updateCloudSyncStatus();
+  saveToLocalStorage();
+  refreshAllUI();
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise
+      .then(value => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch(error => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+function stopRealtimeSync() {
+  _cloudProfileUnsub?.();
+  _cloudLogsUnsub?.();
+  _cloudTodayUnsub?.();
+  _cloudProfileUnsub = null;
+  _cloudLogsUnsub = null;
+  _cloudTodayUnsub = null;
+  _realtimeReady = false;
+}
+
+function startRealtimeSync() {
+  if (!_cloudReady) return;
+  stopRealtimeSync();
+
+  const initialState = { profile: false, logs: false, today: false };
+
+  const tryMarkReady = () => {
+    if (!_realtimeReady && initialState.profile && initialState.logs && initialState.today) {
+      _realtimeReady = true;
+      _lastCloudSyncAt = new Date();
+      _lastCloudError = '';
+      updateCloudSyncStatus();
+      saveToLocalStorage();
+      refreshAllUI();
+    }
+  };
+
+  const onRealtimeError = error => {
+    console.warn('[Fitness] realtime sync failed:', error);
+    _lastCloudError = String(error?.message || error || 'Realtime נכשל');
+    _realtimeReady = false;
+    updateCloudSyncStatus();
+  };
+
+  _cloudProfileUnsub = getUserDocRef().onSnapshot(snapshot => {
+    const data = snapshot.exists ? (snapshot.data() || {}) : {};
+    state.balance = typeof data.balance === 'number' ? data.balance : 0;
+    state.workoutPrice = typeof data.workoutPrice === 'number' ? data.workoutPrice : 80;
+    state.totalWorkouts = typeof data.totalWorkouts === 'number' ? data.totalWorkouts : 0;
+    state.theme = data.theme || 'light';
+    initialState.profile = true;
+
+    if (_realtimeReady) {
+      _lastCloudSyncAt = new Date();
+      saveToLocalStorage();
+      refreshAllUI();
+    }
+    tryMarkReady();
+  }, onRealtimeError);
+
+  _cloudLogsUnsub = getLogsColRef().limit(500).onSnapshot(snapshot => {
+    state.logs = snapshot.docs
+      .map(doc => ({ id: doc.id, ...doc.data() }))
+      .sort((left, right) => getLogSortValue(right) - getLogSortValue(left));
+    initialState.logs = true;
+
+    if (_realtimeReady) {
+      _lastCloudSyncAt = new Date();
+      saveToLocalStorage();
+      refreshAllUI();
+    }
+    tryMarkReady();
+  }, onRealtimeError);
+
+  _cloudTodayUnsub = getDailyReportRef(todayDateKey()).onSnapshot(snapshot => {
+    state.todayReport = snapshot.exists ? { ...snapshot.data(), docId: snapshot.id } : null;
+    initialState.today = true;
+
+    if (_realtimeReady) {
+      _lastCloudSyncAt = new Date();
+      saveToLocalStorage();
+      refreshAllUI();
+    }
+    tryMarkReady();
+  }, onRealtimeError);
+}
+
+async function ensureSharedProfileInitialized() {
+  const sharedRef = getUserDocRef();
+  const sharedSnap = await sharedRef.get();
+  if (sharedSnap.exists) {
+    const sharedData = sharedSnap.data() || {};
+    const sharedLogs = await sharedRef.collection('logs').limit(1).get();
+    if (!shouldBootstrapSharedProfile(sharedData, sharedLogs.empty)) {
+      return;
+    }
   }
 
-  const updatedAt = payload.updatedAt && typeof payload.updatedAt.toDate === 'function'
-    ? payload.updatedAt.toDate()
+  const personalRef = getPersonalUserDocRef();
+  const personalSnap = personalRef ? await personalRef.get() : { exists: false, data: () => null };
+  const legacySnap = _firebaseUid
+    ? await _firebaseDb.collection('fitnessStates').doc(_firebaseUid).get()
+    : { exists: false, data: () => null };
+  const localState = loadFromLocalStorage();
+  const bootstrap = buildBootstrapSource(personalSnap, legacySnap, localState);
+
+  await sharedRef.set({
+    balance: bootstrap.balance,
+    workoutPrice: bootstrap.workoutPrice,
+    totalWorkouts: bootstrap.totalWorkouts,
+    theme: bootstrap.theme,
+    migratedFromUid: _firebaseUid,
+    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  if (bootstrap.logs.length) {
+    const batch = _firebaseDb.batch();
+    bootstrap.logs.slice(0, 500).forEach(log => {
+      const docId = typeof log.id === 'string' && log.id ? log.id : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const { id, ...payload } = log;
+      batch.set(sharedRef.collection('logs').doc(docId), payload, { merge: true });
+    });
+    await batch.commit();
+  }
+
+  if (bootstrap.todayReport) {
+    await sharedRef.collection('dailyReports').doc(todayDateKey()).set(bootstrap.todayReport, { merge: true });
+  }
+}
+
+function shouldBootstrapSharedProfile(sharedData, sharedLogsEmpty) {
+  const hasMeaningfulSharedData =
+    Boolean(sharedData.resetAt) ||
+    (typeof sharedData.balance === 'number' && sharedData.balance !== 0) ||
+    (typeof sharedData.totalWorkouts === 'number' && sharedData.totalWorkouts !== 0) ||
+    (typeof sharedData.workoutPrice === 'number' && sharedData.workoutPrice !== 80) ||
+    !sharedLogsEmpty;
+
+  return !hasMeaningfulSharedData;
+}
+
+function buildBootstrapSource(personalSnap, legacySnap, localState) {
+  const personalData = personalSnap.exists ? (personalSnap.data() || {}) : null;
+  const legacyData = legacySnap.exists ? (legacySnap.data() || {}) : null;
+  const legacyState = legacyData && legacyData.state && typeof legacyData.state === 'object'
+    ? legacyData.state
     : null;
 
+  if (personalData) {
+    return {
+      balance: typeof personalData.balance === 'number' ? personalData.balance : 0,
+      workoutPrice: typeof personalData.workoutPrice === 'number' ? personalData.workoutPrice : 80,
+      totalWorkouts: typeof personalData.totalWorkouts === 'number' ? personalData.totalWorkouts : 0,
+      theme: personalData.theme || (state.theme || 'light'),
+      logs: [],
+      todayReport: null
+    };
+  }
+
+  if (legacyState) {
+    return {
+      balance: typeof legacyState.balance === 'number' ? legacyState.balance : 0,
+      workoutPrice: typeof legacyState.workoutPrice === 'number' ? legacyState.workoutPrice : 80,
+      totalWorkouts: typeof legacyState.totalWorkouts === 'number' ? legacyState.totalWorkouts : 0,
+      theme: legacyState.theme || (state.theme || 'light'),
+      logs: Array.isArray(legacyState.logs) ? legacyState.logs : [],
+      todayReport: legacyState.todayReport || null
+    };
+  }
+
+  if (localState && hasUsefulLocalState(localState)) {
+    return {
+      balance: typeof localState.balance === 'number' ? localState.balance : 0,
+      workoutPrice: typeof localState.workoutPrice === 'number' ? localState.workoutPrice : 80,
+      totalWorkouts: typeof localState.totalWorkouts === 'number' ? localState.totalWorkouts : 0,
+      theme: localState.theme || (state.theme || 'light'),
+      logs: Array.isArray(localState.logs) ? localState.logs : [],
+      todayReport: localState.todayReport || null
+    };
+  }
+
   return {
-    state: { ...DEFAULT_STATE, ...payload.state },
-    updatedAt
+    balance: 0,
+    workoutPrice: 80,
+    totalWorkouts: 0,
+    theme: state.theme || 'light',
+    logs: [],
+    todayReport: null
   };
 }
 
-async function saveState() {
-  // שמירה מיידית ל-localStorage כגיבוי, ואז sync לענן
-  saveStateToLocalStorage();
+function hasUsefulLocalState(localState) {
+  return Boolean(
+    (typeof localState.balance === 'number' && localState.balance !== 0) ||
+    (typeof localState.totalWorkouts === 'number' && localState.totalWorkouts !== 0) ||
+    (typeof localState.workoutPrice === 'number' && localState.workoutPrice !== 80) ||
+    (Array.isArray(localState.logs) && localState.logs.length)
+  );
+}
 
+async function loadTodayReport() {
   try {
-    const cloudOk = await initFirebaseCloud();
-    if (!cloudOk) {
-      return;
-    }
+    const snap = await getDailyReportRef(todayDateKey()).get();
+    state.todayReport = snap.exists ? { ...snap.data(), docId: snap.id } : null;
+  } catch (e) { state.todayReport = null; }
+}
 
-    const ref = getCloudDocRef();
-    await ref.set(
-      {
-        state,
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-      },
-      { merge: true }
-    );
-
+// ============================================================
+//  שמירה לענן
+// ============================================================
+async function saveUserDoc() {
+  saveToLocalStorage();
+  if (!_cloudReady) return false;
+  try {
+    await getUserDocRef().set({
+      balance:      state.balance,
+      workoutPrice: state.workoutPrice,
+      totalWorkouts:state.totalWorkouts,
+      theme:        state.theme,
+      updatedAt:    firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
     _lastCloudSyncAt = new Date();
     updateCloudSyncStatus();
+    return true;
   } catch (e) {
-    console.warn('[FitnessTracker] saveState cloud sync failed:', e);
-    updateCloudSyncStatus('שגיאת סנכרון לענן (הנתונים נשמרו מקומית)');
+    console.warn('[Fitness] saveUserDoc failed:', e);
+    updateCloudSyncStatus('שגיאת שמירה לענן');
+    throw e;
   }
 }
 
-async function hydrateState() {
-  const localState = loadStateFromLocalStorage();
-  state = localState;
+async function deleteCollectionDocs(collectionRef, batchSize = 200) {
+  if (!_cloudReady || !collectionRef) return;
 
-  try {
-    const cloudOk = await initFirebaseCloud();
-    if (!cloudOk) {
-      updateCloudSyncStatus('עובד במצב מקומי בלבד (אין חיבור לענן)');
-      return;
-    }
+  while (true) {
+    const snap = await collectionRef.limit(batchSize).get();
+    if (snap.empty) break;
 
-    const cloudPayload = await loadStateFromCloud();
-    if (cloudPayload) {
-      state = cloudPayload.state;
-      _lastCloudSyncAt = cloudPayload.updatedAt;
-      saveStateToLocalStorage();
-      updateCloudSyncStatus();
-      return;
-    }
+    const batch = _firebaseDb.batch();
+    snap.docs.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
 
-    // מסנכרן לענן את ה-state המקומי הקיים בהרצה ראשונה
-    await saveState();
-  } catch (e) {
-    console.warn('[FitnessTracker] using local state (cloud unavailable):', e);
-    updateCloudSyncStatus('עובד במצב מקומי בלבד (אין חיבור לענן)');
+    if (snap.size < batchSize) break;
   }
 }
 
-function updateCloudSyncStatus(message) {
-  const el = document.getElementById('cloud-sync-status');
-  if (!el) return;
-
-  if (message) {
-    el.textContent = message;
-    return;
-  }
-
+async function resetCloudData() {
   if (!_cloudReady) {
-    el.textContent = _cloudInitError ? `ענן: לא מחובר (${_cloudInitError})` : 'ענן: לא מחובר';
+    localStorage.removeItem(STORAGE_KEY);
     return;
   }
 
-  if (_lastCloudSyncAt instanceof Date && !isNaN(_lastCloudSyncAt)) {
-    el.textContent = `סנכרון אחרון לענן: ${formatDateTime(_lastCloudSyncAt)}`;
-    return;
-  }
+  const userRef = getUserDocRef();
 
-  el.textContent = 'סנכרון לענן פעיל';
+  await deleteCollectionDocs(userRef.collection('logs'));
+  await deleteCollectionDocs(userRef.collection('dailyReports'));
+
+  await userRef.set({
+    balance: 0,
+    workoutPrice: 80,
+    totalWorkouts: 0,
+    theme: 'light',
+    resetAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  localStorage.removeItem(STORAGE_KEY);
+}
+
+async function addLogToCloud(entry) {
+  if (!_cloudReady) return entry.id;
+  try {
+    const ref = await getLogsColRef().add({
+      type:        entry.type,
+      title:       entry.title,
+      amount:      entry.amount,
+      balanceAfter:entry.balanceAfter,
+      date:        entry.date,
+      time:        entry.time,
+      monthKey:    entry.monthKey,
+      note:        entry.note || '',
+      createdAt:   firebase.firestore.FieldValue.serverTimestamp()
+    });
+    return ref.id;
+  } catch (e) {
+    console.warn('[Fitness] addLog failed:', e);
+    return entry.id;
+  }
+}
+
+async function updateLogInCloud(docId, fields) {
+  if (!_cloudReady || !docId) return;
+  try { await getLogsColRef().doc(docId).update(fields); }
+  catch (e) { console.warn('[Fitness] updateLog failed:', e); }
+}
+
+async function deleteLogFromCloud(docId) {
+  if (!_cloudReady || !docId) return;
+  try { await getLogsColRef().doc(docId).delete(); }
+  catch (e) { console.warn('[Fitness] deleteLog failed:', e); }
+}
+
+async function saveDailyReport(dateKey, data) {
+  if (!_cloudReady) return;
+  try {
+    await getDailyReportRef(dateKey).set({
+      ...data,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  } catch (e) { console.warn('[Fitness] saveDailyReport failed:', e); }
 }
 
 // ============================================================
-//  ניווט בין מסכים
+//  עזרים
 // ============================================================
+function formatNum(n) {
+  if (typeof n !== 'number' || isNaN(n)) return '0';
+  return Math.round(n).toLocaleString('he-IL');
+}
 
-/** מציג מסך לפי שם (home / log / settings) */
+function formatDateTime(date) {
+  if (!(date instanceof Date) || isNaN(date)) return '-';
+  return date.toLocaleString('he-IL', {
+    year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit'
+  });
+}
+
+function getLogSortValue(entry) {
+  const createdAt = entry?.createdAt;
+  if (createdAt && typeof createdAt.toDate === 'function') {
+    return createdAt.toDate().getTime();
+  }
+
+  const datePart = typeof entry?.date === 'string' ? entry.date : '';
+  const timePart = typeof entry?.time === 'string' ? entry.time : '00:00';
+  const match = datePart.match(/(\d{2})[./-](\d{2})[./-](\d{4})/);
+  if (match) {
+    const [, day, month, year] = match;
+    const parsed = new Date(`${year}-${month}-${day}T${timePart}`);
+    if (!isNaN(parsed)) return parsed.getTime();
+  }
+
+  const idNumber = Number(String(entry?.id || '').split('-')[0]);
+  return Number.isFinite(idNumber) ? idNumber : 0;
+}
+
+function setLoadingState(isLoading, message = 'טוען נתונים...') {
+  const overlay = document.getElementById('loading-overlay');
+  const text = document.getElementById('loading-text');
+  if (!overlay || !text) return;
+  text.textContent = message;
+  overlay.classList.toggle('show', isLoading);
+}
+
+function escapeHTML(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function isIOS() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function buildLogEntry({ type, title, amount, balanceAfter, note = '' }) {
+  const now      = new Date();
+  const dateStr  = now.toLocaleDateString('he-IL', { year:'numeric', month:'2-digit', day:'2-digit' });
+  const timeStr  = now.toLocaleTimeString('he-IL', { hour:'2-digit', minute:'2-digit' });
+  const monthKey = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2,9)}`,
+    type, title, amount, balanceAfter,
+    date: dateStr, time: timeStr, monthKey, note
+  };
+}
+
+// ============================================================
+//  ניווט
+// ============================================================
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  const target = document.getElementById(`screen-${name}`);
-  if (target) target.classList.add('active');
-
-  // עדכון ניווט תחתון
-  document.querySelectorAll('.nav-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.screen === name);
-  });
-
-  // רינדור תוכן מסך-ספציפי
+  const t = document.getElementById(`screen-${name}`);
+  if (t) t.classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.screen === name));
   if (name === 'journal') renderJournal();
   if (name === 'summary') renderMonthlySummary();
   if (name === 'settings') renderSettings();
 }
 
-/** מציג bottom-sheet (add-money / set-balance / edit-entry) */
 function showSubScreen(name, preserveInputs = false) {
-  // סגור כל bottom-sheet פתוח
   document.querySelectorAll('.sub-screen').forEach(s => {
-    s.style.display = 'none';
-    s.classList.remove('active');
+    s.style.display = 'none'; s.classList.remove('active');
   });
-
-  const target = document.getElementById(`sub-screen-${name}`);
-  if (!target) return;
-
+  const t = document.getElementById(`sub-screen-${name}`);
+  if (!t) return;
   if (!preserveInputs) {
-    target.querySelectorAll('input[type="number"], input[type="text"]').forEach(inp => {
-      inp.value = '';
-    });
+    t.querySelectorAll('input[type="number"],input[type="text"]').forEach(i => { i.value = ''; });
   }
-
-  target.style.display = 'flex';
-  // עיכוב קטן כדי שה-CSS transition ירוץ
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => target.classList.add('active'));
-  });
+  t.style.display = 'flex';
+  requestAnimationFrame(() => requestAnimationFrame(() => t.classList.add('active')));
 }
 
-/** מסתיר bottom-sheet פעיל */
 function hideSubScreen() {
   document.querySelectorAll('.sub-screen.active').forEach(s => {
     s.classList.remove('active');
-    // מחכה לסיום האנימציה לפני הסרה מה-DOM
     setTimeout(() => { s.style.display = 'none'; }, 340);
   });
-
   _editingEntryId = null;
 }
 
-/** סגירה בלחיצה על הרקע (overlay) */
-function handleSubScreenOverlayClick(event) {
-  if (event.target.classList.contains('sub-screen')) {
-    hideSubScreen();
-  }
+function handleSubScreenOverlayClick(e) {
+  if (e.target.classList.contains('sub-screen')) hideSubScreen();
 }
 
 // ============================================================
-//  פעולת אימון
+//  פעולות אימון יומי (עם בדיקת כפילות)
 // ============================================================
-
-// דגל למניעת לחיצה כפולה
-let _workoutLocked = false;
-
-/** מטפל בלחיצה על "כן" – היה אימון היום */
 function handleWorkout() {
   if (_workoutLocked) return;
   _workoutLocked = true;
-
-  doWorkout();
-  // שחרר אחרי 800ms למניעת double-tap
   setTimeout(() => { _workoutLocked = false; }, 800);
-}
 
-/** מטפל בלחיצה על "לא" – לא היה אימון היום */
-function skipWorkout() {
-  showToast('בסדר, לא נרשם אימון היום', 'info');
-}
+  if (state.todayReport) {
+    if (state.todayReport.type === 'workout_done') {
+      showToast('כבר נרשם אימון היום ✓', 'info');
+      return;
+    }
+    showConfirm('עדכון דיווח יומי',
+      'כבר נרשם "לא היה אימון" היום. האם לשנות ל"היה אימון"?',
+      () => doWorkout(true));
+    return;
+  }
 
-/** מבצע את פעולת האימון בפועל */
-function doWorkout() {
   const price = state.workoutPrice;
-  state.balance -= price;
+  if (state.balance - price < 0) {
+    showConfirm('מינוס בקופה',
+      `רישום האימון יגרום למינוס של ₪${formatNum(Math.abs(state.balance - price))}. להמשיך?`,
+      () => doWorkout(false));
+    return;
+  }
+
+  doWorkout(false);
+}
+
+async function doWorkout(isUpdate) {
+  const price   = state.workoutPrice;
+  const dateKey = todayDateKey();
+
+  if (isUpdate && state.todayReport) {
+    // no_workout → workout_done: מחק לוג no_workout הקודם
+    if (state.todayReport.logId) {
+      state.logs = state.logs.filter(l => l.id !== state.todayReport.logId);
+      await deleteLogFromCloud(state.todayReport.logId);
+    }
+  }
+
+  state.balance      -= price;
   state.totalWorkouts += 1;
 
-  addLogEntry({
-    type: 'workout_done',
-    title: 'אימון כושר',
-    amount: -price,
-    balanceAfter: state.balance,
-    note: ''
+  const entry = buildLogEntry({
+    type: 'workout_done', title: 'אימון כושר',
+    amount: -price, balanceAfter: state.balance
   });
+  state.logs.unshift(entry);
+  const cloudId = await addLogToCloud(entry);
+  entry.id = cloudId;
 
-  saveState();
+  state.todayReport = { type: 'workout_done', logId: cloudId, date: dateKey };
+  await saveDailyReport(dateKey, { type: 'workout_done', logId: cloudId, date: dateKey });
+  await saveUserDoc();
   updateHomeUI();
-  showToast('האימון נרשם בהצלחה! 💪', 'success');
+  showToast('האימון נרשם! 💪', 'success');
+}
+
+function skipWorkout() {
+  if (_workoutLocked) return;
+  _workoutLocked = true;
+  setTimeout(() => { _workoutLocked = false; }, 800);
+
+  if (state.todayReport) {
+    if (state.todayReport.type === 'no_workout') {
+      showToast('כבר נרשם "לא היה אימון" היום', 'info');
+      return;
+    }
+    showConfirm('עדכון דיווח יומי',
+      'כבר נרשם אימון היום. האם לשנות ל"לא היה אימון"? הכסף יוחזר.',
+      () => doSkip(true));
+    return;
+  }
+
+  doSkip(false);
+}
+
+async function doSkip(isUpdate) {
+  const dateKey = todayDateKey();
+
+  if (isUpdate && state.todayReport) {
+    if (state.todayReport.type === 'workout_done') {
+      // החזר כסף
+      state.balance      += state.workoutPrice;
+      state.totalWorkouts = Math.max(0, state.totalWorkouts - 1);
+    }
+    if (state.todayReport.logId) {
+      state.logs = state.logs.filter(l => l.id !== state.todayReport.logId);
+      await deleteLogFromCloud(state.todayReport.logId);
+    }
+  }
+
+  const entry = buildLogEntry({
+    type: 'no_workout', title: 'לא היה אימון',
+    amount: 0, balanceAfter: state.balance
+  });
+  state.logs.unshift(entry);
+  const cloudId = await addLogToCloud(entry);
+  entry.id = cloudId;
+
+  state.todayReport = { type: 'no_workout', logId: cloudId, date: dateKey };
+  await saveDailyReport(dateKey, { type: 'no_workout', logId: cloudId, date: dateKey });
+  await saveUserDoc();
+  updateHomeUI();
+  showToast('נרשם: לא היה אימון היום', 'info');
 }
 
 // ============================================================
 //  הוספת כסף
 // ============================================================
-function addMoney() {
+async function addMoney() {
   const amountInput = document.getElementById('add-money-input');
   const noteInput   = document.getElementById('add-money-note');
   const amount = parseFloat(amountInput.value);
-
   if (!amount || amount <= 0 || isNaN(amount)) {
-    showToast('יש להזין סכום חיובי', 'error');
-    amountInput.focus();
-    return;
+    showToast('יש להזין סכום חיובי', 'error'); amountInput.focus(); return;
   }
-
-  state.balance += amount;
-
-  addLogEntry({
-    type: 'money_added',
-    title: 'הוספת כסף',
-    amount: amount,
-    balanceAfter: state.balance,
-    note: noteInput.value.trim()
-  });
-
-  saveState();
-  updateHomeUI();
-  hideSubScreen();
-  showToast(`₪${formatNum(amount)} נוספו לקופה 💰`, 'success');
+  try {
+    state.balance += amount;
+    const entry = buildLogEntry({
+      type: 'money_added', title: 'הוספת כסף',
+      amount, balanceAfter: state.balance,
+      note: noteInput.value.trim()
+    });
+    state.logs.unshift(entry);
+    const id = await addLogToCloud(entry);
+    entry.id = id;
+    await saveUserDoc();
+    updateHomeUI();
+    hideSubScreen();
+    showToast(`₪${formatNum(amount)} נוספו לקופה 💰`, 'success');
+  } catch (e) {
+    console.warn('[Fitness] addMoney failed:', e);
+    showToast('שמירה לענן נכשלה', 'error');
+  }
 }
 
 // ============================================================
-//  קביעת יתרה ידנית
+//  קביעת יתרה
 // ============================================================
-function setBalance() {
+async function setBalance() {
   const amountInput = document.getElementById('set-balance-input');
   const noteInput   = document.getElementById('set-balance-note');
   const newBalance  = parseFloat(amountInput.value);
-
   if (isNaN(newBalance)) {
-    showToast('יש להזין יתרה תקינה', 'error');
-    amountInput.focus();
-    return;
+    showToast('יש להזין יתרה תקינה', 'error'); amountInput.focus(); return;
   }
-
-  const oldBalance = state.balance;
-  state.balance = newBalance;
-
-  addLogEntry({
-    type: 'balance_set',
-    title: 'עדכון יתרה ידני',
-    amount: newBalance - oldBalance,
-    balanceAfter: newBalance,
-    note: noteInput.value.trim() || `שונה מ-₪${formatNum(oldBalance)} ל-₪${formatNum(newBalance)}`
-  });
-
-  saveState();
-  updateHomeUI();
-  hideSubScreen();
-  showToast('היתרה עודכנה ✅', 'success');
+  try {
+    const oldBalance = state.balance;
+    state.balance = newBalance;
+    const entry = buildLogEntry({
+      type: 'balance_set', title: 'עדכון יתרה ידני',
+      amount: newBalance - oldBalance, balanceAfter: newBalance,
+      note: noteInput.value.trim() || `שונה מ-₪${formatNum(oldBalance)} ל-₪${formatNum(newBalance)}`
+    });
+    state.logs.unshift(entry);
+    const id = await addLogToCloud(entry);
+    entry.id = id;
+    await saveUserDoc();
+    updateHomeUI();
+    hideSubScreen();
+    showToast('היתרה עודכנה ✅', 'success');
+  } catch (e) {
+    console.warn('[Fitness] setBalance failed:', e);
+    showToast('שמירה לענן נכשלה', 'error');
+  }
 }
 
 // ============================================================
-//  עדכון מחיר אימון
+//  עדכון מחיר
 // ============================================================
-function updatePrice() {
+async function updatePrice() {
   const input = document.getElementById('price-input');
   const newPrice = parseFloat(input.value);
-
   if (!newPrice || newPrice <= 0 || isNaN(newPrice)) {
-    showToast('יש להזין מחיר חיובי', 'error');
-    input.focus();
-    return;
+    showToast('יש להזין מחיר חיובי', 'error'); input.focus(); return;
   }
-
-  const oldPrice = state.workoutPrice;
-  state.workoutPrice = newPrice;
-
-  addLogEntry({
-    type: 'price_changed',
-    title: 'שינוי מחיר אימון',
-    amount: 0,
-    balanceAfter: state.balance,
-    note: `מחיר שונה מ-₪${formatNum(oldPrice)} ל-₪${formatNum(newPrice)}`
-  });
-
-  saveState();
-  updateHomeUI();
-  showToast(`מחיר אימון עודכן ל-₪${formatNum(newPrice)}`, 'success');
-}
-
-// ============================================================
-//  הגדרות התראות
-// ============================================================
-
-/** שומר הגדרות תזכורת */
-async function saveNotificationSettings() {
-  const timeInput = document.getElementById('reminder-time-input');
-  const toggle    = document.getElementById('notifications-toggle');
-
-  state.reminderTime        = timeInput.value || '09:00';
-  state.notificationsEnabled = toggle.checked;
-
-  if (state.notificationsEnabled) {
-    const granted = await requestNotificationPermission();
-    if (!granted) {
-      state.notificationsEnabled = false;
-      toggle.checked = false;
-    } else {
-      await syncCloudPushToken();
-    }
-  } else {
-    updatePushStatus('Push מהענן כבוי (המתג כבוי)');
-  }
-
-  saveState();
-  setupReminderCheck();
-  updateNotificationStatus();
-  updateReminderStatus();
-  showToast('הגדרות נשמרו', 'success');
-}
-
-/** מבקש הרשאת התראות מהדפדפן */
-async function requestNotificationPermission() {
-  if (!('Notification' in window)) {
-    updateNotificationStatus('התראות אינן נתמכות בדפדפן זה');
-    return false;
-  }
-
-  if (Notification.permission === 'granted') {
-    updateNotificationStatus('התראות מופעלות ✓');
-    return true;
-  }
-
-  if (Notification.permission !== 'denied') {
-    const permission = await Notification.requestPermission();
-    if (permission === 'granted') {
-      updateNotificationStatus('התראות מופעלות ✓');
-      return true;
-    }
-  }
-
-  updateNotificationStatus('הגישה להתראות לא אושרה. שנה בהגדרות הדפדפן.');
-  return false;
-}
-
-function updateNotificationStatus(msg) {
-  const el = document.getElementById('notification-status');
-  if (!el) return;
-
-  if (msg) { el.textContent = msg; return; }
-
-  if (!('Notification' in window)) {
-    el.textContent = 'התראות אינן נתמכות';
-  } else if (Notification.permission === 'granted') {
-    el.textContent = state.notificationsEnabled ? 'התראות מופעלות ✓' : '';
-  } else if (Notification.permission === 'denied') {
-    el.textContent = 'הגישה להתראות נחסמה בדפדפן';
-  } else {
-    el.textContent = '';
-  }
-}
-
-function updatePushStatus(msg) {
-  const el = document.getElementById('push-status');
-  if (!el) return;
-
-  if (msg) {
-    el.textContent = msg;
-    return;
-  }
-
-  if (!state.notificationsEnabled) {
-    el.textContent = 'Push מהענן כבוי (התראות לא פעילות)';
-    return;
-  }
-
-  if (!canUseCloudPush()) {
-    el.textContent = 'Push מהענן לא זמין במכשיר/דפדפן הזה';
-    return;
-  }
-
-  if (!hasUsableVapidKey()) {
-    el.textContent = 'חסר VAPID key ב-firebase-config.js';
-    return;
-  }
-
-  if (_fcmToken) {
-    el.textContent = 'Push מהענן פעיל ✓ (הטוקן נרשם בענן)';
-    return;
-  }
-
-  el.textContent = 'Push מהענן עדיין לא נרשם';
-}
-
-async function syncCloudPushToken() {
-  if (!state.notificationsEnabled) return;
-
-  if (!canUseCloudPush()) {
-    updatePushStatus('Push מהענן לא זמין במכשיר/דפדפן הזה');
-    return;
-  }
-
-  if (!hasUsableVapidKey()) {
-    updatePushStatus('חסר VAPID key ב-firebase-config.js');
-    return;
-  }
-
-  const cloudOk = await initFirebaseCloud();
-  if (!cloudOk) {
-    updatePushStatus('Push מהענן לא נרשם כי אין חיבור Firebase');
-    return;
-  }
-
-  const messaging = await initFirebaseMessaging();
-  if (!messaging) {
-    updatePushStatus('Firebase Messaging לא נטען');
-    return;
-  }
-
-  const registration = await registerServiceWorker();
-  if (!registration) {
-    updatePushStatus('Service Worker לא נרשם ולכן Push לא פעיל');
-    return;
-  }
-
   try {
-    const token = await messaging.getToken({
-      vapidKey: FIREBASE_CONFIG.vapidKey,
-      serviceWorkerRegistration: registration
+    const oldPrice = state.workoutPrice;
+    state.workoutPrice = newPrice;
+    const entry = buildLogEntry({
+      type: 'price_changed', title: 'שינוי מחיר אימון',
+      amount: 0, balanceAfter: state.balance,
+      note: `מחיר שונה מ-₪${formatNum(oldPrice)} ל-₪${formatNum(newPrice)}`
     });
-
-    if (!token) {
-      updatePushStatus('לא התקבל טוקן Push מהדפדפן');
-      return;
-    }
-
-    _fcmToken = token;
-    const ref = getCloudDocRef();
-    await ref.set(
-      {
-        pushTokens: firebase.firestore.FieldValue.arrayUnion(token),
-        pushUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
-      },
-      { merge: true }
-    );
-
-    updatePushStatus();
+    state.logs.unshift(entry);
+    const id = await addLogToCloud(entry);
+    entry.id = id;
+    await saveUserDoc();
+    updateHomeUI();
+    showToast(`מחיר אימון עודכן ל-₪${formatNum(newPrice)}`, 'success');
   } catch (e) {
-    console.warn('[FitnessTracker] push token registration failed:', e);
-    updatePushStatus('נכשלה הרשמת Push בענן');
+    console.warn('[Fitness] updatePrice failed:', e);
+    showToast('שמירה לענן נכשלה', 'error');
   }
-}
-
-function updateReminderStatus() {
-  const el = document.getElementById('reminder-status');
-  if (!el) return;
-
-  const details = state.lastReminderAt
-    ? `נשלחה לאחרונה: ${formatDateTime(new Date(state.lastReminderAt))}`
-    : 'עדיין לא נשלחה תזכורת.';
-
-  el.textContent = `התזכורת נבדקת כשהאפליקציה פעילה או חוזרת לקדמה. ${details}`;
-}
-
-function updateNotificationLimitations() {
-  const el = document.getElementById('notification-limitations');
-  if (!el) return;
-
-  el.textContent = 'ברקע אמיתי או במסך נעול iPhone עשוי להשהות אפליקציה. לכן תזכורת מבוססת טיימר מקומי אינה אמינה ברקע. Push אמיתי מהענן נרשם כאן ללא עלות.';
 }
 
 // ============================================================
-//  תזכורת יומית
+//  Pull-to-Refresh
 // ============================================================
-
-/** מגדיר בדיקה תקופתית לתזכורת (כל דקה) */
-function setupReminderCheck() {
-  if (window._reminderInterval) clearInterval(window._reminderInterval);
-  if (!state.notificationsEnabled) return;
-
-  checkReminder(); // בדיקה מיידית
-  window._reminderInterval = setInterval(checkReminder, 60_000);
-}
-
-/** בודק אם עכשיו זמן התזכורת ושולח אם צריך */
-function checkReminder() {
-  if (!state.notificationsEnabled) return;
-
-  const now = new Date();
-  const [h, m] = state.reminderTime.split(':').map(Number);
-  const reminderTime = new Date();
-  reminderTime.setHours(h, m, 0, 0);
-
-  const todayKey  = now.toDateString();
-  const legacyLastKey = localStorage.getItem('_last-reminder');
-  const lastKey = state.lastReminderDateKey || legacyLastKey;
-  const diffMs    = now - reminderTime;
-
-  // שלח ברגע שעברנו את שעת התזכורת, גם אם ה-interval לא פגע בדיוק בדקה.
-  if (diffMs >= 0 && lastKey !== todayKey) {
-    localStorage.setItem('_last-reminder', todayKey);
-    state.lastReminderDateKey = todayKey;
-    sendReminder();
-  }
-}
-
-/** שולח התראה (Service Worker אם אפשר, אחרת Notification/toast) */
-async function sendReminder(isTest = false) {
-  const title = 'כושר – תזכורת יומית';
-  const body  = isTest ? 'זוהי תזכורת בדיקה כדי לוודא שהתראות פועלות.' : 'האם היה אימון כושר היום? 🏋️';
-
-  try {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      const registration = 'serviceWorker' in navigator
-        ? await navigator.serviceWorker.getRegistration().catch(() => null)
-        : null;
-
-      if (registration?.showNotification) {
-        await registration.showNotification(title, {
-          body,
-          icon: 'icons/icon.svg',
-          badge: 'icons/icon.svg',
-          tag: isTest ? 'fitness-test-reminder' : 'fitness-daily-reminder',
-          renotify: true,
-          dir: 'rtl',
-          lang: 'he'
-        });
-      } else {
-        new Notification(title, { body, icon: 'icons/icon.svg', dir: 'rtl', lang: 'he' });
-      }
-    } else {
-      showToast(`${title}: ${body}`, 'info');
-    }
-  } catch {
-    showToast(`${title}: ${body}`, 'info');
-  }
-
-  if (!isTest) {
-    state.lastReminderAt = new Date().toISOString();
-    updateReminderStatus();
-
-    addLogEntry({
-      type: 'reminder',
-      title: 'תזכורת יומית',
-      amount: 0,
-      balanceAfter: state.balance,
-      note: 'תזכורת יומית אוטומטית'
-    });
-    saveState();
-    return;
-  }
-
-  updateNotificationStatus('תזכורת בדיקה נשלחה');
-  showToast('תזכורת בדיקה נשלחה', 'success');
-}
-
-function sendTestReminder() {
-  if (!state.notificationsEnabled) {
-    showToast('יש להפעיל התראות קודם', 'warning');
-    return;
-  }
-
-  sendReminder(true);
-}
-
 async function refreshFromPull() {
   if (_isPullRefreshing) return;
-
   _isPullRefreshing = true;
   setPullRefreshIndicator('מרענן נתונים...', true);
-
   try {
-    await hydrateState();
-    const registration = 'serviceWorker' in navigator
-      ? await navigator.serviceWorker.getRegistration().catch(() => null)
-      : null;
-    await registration?.update?.();
-    refreshAllUI();
-    showToast('הנתונים עודכנו', 'success');
+    const ok = await hydrateState();
+    if (!ok || _lastCloudError) {
+      showToast('סנכרון ענן נכשל', 'error');
+    } else {
+      refreshAllUI();
+      showToast('הנתונים עודכנו מהענן', 'success');
+    }
   } catch {
     showToast('לא ניתן היה לרענן כעת', 'error');
   } finally {
@@ -760,62 +854,395 @@ async function refreshFromPull() {
   }
 }
 
-function setPullRefreshIndicator(message, active, ready = false) {
-  const indicator = document.getElementById('pull-refresh-indicator');
-  if (!indicator) return;
-
-  indicator.textContent = message;
-  indicator.classList.toggle('visible', active || ready);
-  indicator.classList.toggle('ready', ready);
-  indicator.classList.toggle('refreshing', active);
+function setPullRefreshIndicator(msg, active, ready = false) {
+  const el = document.getElementById('pull-refresh-indicator');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.toggle('visible',    active || ready);
+  el.classList.toggle('ready',      ready);
+  el.classList.toggle('refreshing', active);
 }
 
 function setupPullToRefresh() {
   const screen = document.getElementById('screen-home');
-  if (!screen || screen.dataset.pullToRefreshReady === 'true') return;
-
-  const stateRef = {
-    startY: 0,
-    deltaY: 0,
-    dragging: false
-  };
-
-  screen.addEventListener('touchstart', event => {
-    if (screen.scrollTop > 0 || event.touches.length !== 1 || _isPullRefreshing) return;
-    stateRef.startY = event.touches[0].clientY;
-    stateRef.deltaY = 0;
-    stateRef.dragging = true;
+  if (!screen || screen.dataset.pullReady === 'true') return;
+  const s = { startY:0, deltaY:0, dragging:false };
+  screen.addEventListener('touchstart', e => {
+    if (screen.scrollTop > 0 || e.touches.length !== 1 || _isPullRefreshing) return;
+    s.startY = e.touches[0].clientY; s.deltaY = 0; s.dragging = true;
   }, { passive: true });
-
-  screen.addEventListener('touchmove', event => {
-    if (!stateRef.dragging || event.touches.length !== 1) return;
-
-    stateRef.deltaY = Math.max(0, event.touches[0].clientY - stateRef.startY);
-    if (stateRef.deltaY <= 0 || screen.scrollTop > 0) return;
-
-    const ready = stateRef.deltaY > 70;
+  screen.addEventListener('touchmove', e => {
+    if (!s.dragging || e.touches.length !== 1) return;
+    s.deltaY = Math.max(0, e.touches[0].clientY - s.startY);
+    if (s.deltaY <= 0 || screen.scrollTop > 0) return;
+    const ready = s.deltaY > 70;
     setPullRefreshIndicator(ready ? 'שחרר כדי לרענן' : 'משוך למטה כדי לרענן', true, ready);
-    if (stateRef.deltaY > 6) {
-      event.preventDefault();
-    }
+    if (s.deltaY > 6) e.preventDefault();
   }, { passive: false });
-
   screen.addEventListener('touchend', () => {
-    if (!stateRef.dragging) return;
-
-    const shouldRefresh = stateRef.deltaY > 70;
-    stateRef.dragging = false;
-    stateRef.deltaY = 0;
-
-    if (shouldRefresh) {
-      refreshFromPull();
-      return;
-    }
-
+    if (!s.dragging) return;
+    const should = s.deltaY > 70;
+    s.dragging = false; s.deltaY = 0;
+    if (should) { refreshFromPull(); return; }
     setPullRefreshIndicator('משוך למטה כדי לרענן', false);
   });
+  screen.dataset.pullReady = 'true';
+}
 
-  screen.dataset.pullToRefreshReady = 'true';
+// ============================================================
+//  יומן – רינדור
+// ============================================================
+function renderJournal() {
+  const container = document.getElementById('journal-container');
+  if (!container) return;
+  if (state.logs.length === 0) {
+    container.innerHTML = `<div class="empty-state"><div class="empty-icon">📋</div><h3>היומן עדיין ריק</h3><p>כאן יופיעו כל הפעולות שביצעת</p></div>`;
+    return;
+  }
+  const grouped = {};
+  state.logs.forEach(e => {
+    const mk = e.monthKey || deriveMonthKey(e.date);
+    if (!grouped[mk]) grouped[mk] = [];
+    grouped[mk].push(e);
+  });
+  const sortedMonths = Object.keys(grouped).sort().reverse();
+  let html = '';
+  sortedMonths.forEach(mk => {
+    const [y, m] = mk.split('-');
+    const label = new Date(y, Number(m)-1, 1).toLocaleDateString('he-IL', { year:'numeric', month:'long' });
+    html += `<div class="log-month-header">${label}</div><div class="log-month-group">`;
+    grouped[mk].forEach(e => { html += buildJournalEntryHTML(e); });
+    html += `</div>`;
+  });
+  container.innerHTML = html;
+}
+
+const LOG_CONFIG = {
+  workout_done:   { icon:'🏋️', color:'red',   label:'אימון'           },
+  no_workout:     { icon:'⏭️', color:'gray',  label:'לא היה אימון'    },
+  money_added:    { icon:'💰', color:'green', label:'הוספת כסף'       },
+  balance_set:    { icon:'✏️', color:'blue',  label:'עדכון יתרה'      },
+  price_changed:  { icon:'🏷️', color:'blue',  label:'שינוי מחיר'      },
+  journal_edited: { icon:'🧾', color:'gray',  label:'עריכת יומן'      },
+  journal_deleted:{ icon:'🗑️', color:'gray',  label:'מחיקת יומן'     },
+};
+
+function buildJournalEntryHTML(entry) {
+  const cfg = LOG_CONFIG[entry.type] || { icon:'📝', color:'gray', label: entry.type };
+  const amountHTML = entry.amount !== 0
+    ? `<span class="amount ${entry.amount > 0 ? 'positive' : 'negative'}">${entry.amount > 0 ? '+' : ''}₪${formatNum(Math.abs(entry.amount))}</span>`
+    : '';
+  const noteHTML = entry.note ? `<div class="log-note">${escapeHTML(entry.note)}</div>` : '';
+  const dtHTML   = `<div class="log-entry-datetime" dir="rtl"><span>${entry.date}</span><span>${entry.time}</span></div>`;
+  const editBtn  = `<button class="journal-edit-btn" type="button"
+    data-entry-id="${escapeHTML(entry.id)}"
+    data-entry-title="${escapeHTML(entry.title)}"
+    data-entry-amount="${entry.amount}"
+    data-entry-note="${escapeHTML(entry.note||'')}"
+    onclick="openEditEntryFromButton(this)">עריכה</button>`;
+  return `<div class="log-entry">
+    <div class="log-entry-icon log-icon-${cfg.color}">${cfg.icon}</div>
+    <div class="log-entry-body">
+      <div class="log-entry-title">${escapeHTML(entry.title)}</div>
+      <div class="log-entry-meta">${dtHTML}${noteHTML}</div>
+      <div class="journal-entry-actions">${editBtn}</div>
+    </div>
+    <div class="log-entry-amounts">${amountHTML}<div class="log-balance-after">₪${formatNum(entry.balanceAfter)}</div></div>
+  </div>`;
+}
+
+// ============================================================
+//  סיכום חודשי
+// ============================================================
+function renderMonthlySummary() {
+  const container = document.getElementById('monthly-summary-container');
+  if (!container) return;
+  if (state.logs.length === 0) {
+    container.innerHTML = `<div class="empty-state"><div class="empty-icon">📆</div><h3>אין עדיין נתונים חודשיים</h3></div>`;
+    return;
+  }
+  const currentMK = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+  const summaries  = buildMonthlySummaries();
+  container.innerHTML = summaries.map(s => `
+    <div class="summary-month-card${s.monthKey === currentMK ? ' current' : ''}">
+      <div class="summary-month-header-row">
+        <div class="summary-month-title">${escapeHTML(s.label)}</div>
+        <div class="summary-month-badge">${s.monthKey === currentMK ? 'החודש' : 'סיכום'}</div>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-stat"><div class="summary-stat-value">${s.workoutDays}</div><div class="summary-stat-label">ימי אימון</div></div>
+        <div class="summary-stat"><div class="summary-stat-value">${s.noWorkoutDays}</div><div class="summary-stat-label">ללא אימון</div></div>
+        <div class="summary-stat"><div class="summary-stat-value">₪${formatNum(s.added)}</div><div class="summary-stat-label">כסף נוסף</div></div>
+        <div class="summary-stat"><div class="summary-stat-value">₪${formatNum(s.spent)}</div><div class="summary-stat-label">כסף ירד</div></div>
+      </div>
+    </div>`).join('');
+}
+
+function buildMonthlySummaries() {
+  const grouped = new Map();
+  state.logs.forEach(entry => {
+    const mk = entry.monthKey || deriveMonthKey(entry.date);
+    if (!grouped.has(mk)) {
+      const [y, m] = mk.split('-');
+      grouped.set(mk, {
+        monthKey: mk,
+        label: new Date(Number(y), Number(m)-1, 1).toLocaleDateString('he-IL', { year:'numeric', month:'long' }),
+        workoutDays: 0, noWorkoutDays: 0, spent: 0, added: 0
+      });
+    }
+    const t = grouped.get(mk);
+    if (entry.type === 'workout_done') { t.workoutDays++;   t.spent += Math.abs(Number(entry.amount)||0); }
+    if (entry.type === 'no_workout')   { t.noWorkoutDays++; }
+    if ((Number(entry.amount)||0) > 0) { t.added += Number(entry.amount)||0; }
+  });
+  return Array.from(grouped.values()).sort((a,b) => b.monthKey.localeCompare(a.monthKey));
+}
+
+function deriveMonthKey(dateStr) {
+  if (typeof dateStr !== 'string') {
+    const n = new Date();
+    return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}`;
+  }
+  const parts = dateStr.split(/[./-]/).map(p => p.trim());
+  if (parts.length !== 3) {
+    const n = new Date();
+    return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}`;
+  }
+  const [day, month, year] = parts;
+  return `${year}-${String(month).padStart(2,'0')}`;
+}
+
+// ============================================================
+//  עריכה / מחיקה ביומן
+// ============================================================
+function openEditEntryFromButton(btn) {
+  openEditEntry(btn.dataset.entryId, btn.dataset.entryTitle||'', Number(btn.dataset.entryAmount)||0, btn.dataset.entryNote||'');
+}
+
+function openEditEntry(id, title, amount, note) {
+  const entry = state.logs.find(l => l.id === id);
+  if (!entry) return;
+  _editingEntryId = id;
+  document.getElementById('edit-entry-title').value  = title  || entry.title  || '';
+  const amtInput = document.getElementById('edit-entry-amount');
+  amtInput.value    = Number.isFinite(amount) ? amount : (Number(entry.amount)||0);
+  amtInput.disabled = isZeroAmountEntry(entry);
+  document.getElementById('edit-entry-note').value   = note   || entry.note   || '';
+  showSubScreen('edit-entry', true);
+}
+
+function saveEditedEntry() {
+  if (!_editingEntryId) return;
+  const entry = state.logs.find(l => l.id === _editingEntryId);
+  if (!entry) return;
+  const newTitle  = document.getElementById('edit-entry-title').value.trim();
+  const amtInput  = document.getElementById('edit-entry-amount');
+  const rawAmount = parseFloat(amtInput.value);
+  const newAmount = amtInput.disabled ? Number(entry.amount)||0 : normalizeEntryAmount(entry.type, rawAmount);
+  const newNote   = document.getElementById('edit-entry-note').value.trim();
+  if (!newTitle || Number.isNaN(newAmount)) { showToast('יש למלא כותרת וסכום תקין', 'error'); return; }
+
+  const before = { title: entry.title, amount: entry.amount, note: entry.note };
+  entry.title = newTitle; entry.amount = newAmount; entry.note = newNote;
+  recalculateFromLogs();
+
+  const audit = buildLogEntry({ type:'journal_edited', title:'נערכה רשומה', amount:0, balanceAfter:state.balance, note:`"${before.title}" עודכנה` });
+  state.logs.unshift(audit);
+  updateLogInCloud(entry.id, { title:entry.title, amount:entry.amount, note:entry.note, balanceAfter:entry.balanceAfter });
+  addLogToCloud(audit).then(id => { audit.id = id; });
+  recalculateFromLogs();
+  saveUserDoc();
+  refreshAllUI();
+  hideSubScreen();
+  showToast('הרשומה עודכנה', 'success');
+}
+
+function deleteEditedEntry() {
+  if (!_editingEntryId) return;
+  const entry = state.logs.find(l => l.id === _editingEntryId);
+  if (!entry) return;
+  showConfirm('מחיקת רשומה', 'הרשומה תימחק מהיומן. האם להמשיך?', async () => {
+    const removed = { ...entry };
+    state.logs = state.logs.filter(l => l.id !== _editingEntryId);
+    recalculateFromLogs();
+    const audit = buildLogEntry({ type:'journal_deleted', title:'נמחקה רשומה', amount:0, balanceAfter:state.balance, note:`נמחקה: "${removed.title}"` });
+    state.logs.unshift(audit);
+    await deleteLogFromCloud(removed.id);
+    await addLogToCloud(audit).then(id => { audit.id = id; });
+    recalculateFromLogs();
+    await saveUserDoc();
+    refreshAllUI();
+    hideSubScreen();
+    showToast('הרשומה נמחקה', 'warning');
+  });
+}
+
+function isZeroAmountEntry(entry) {
+  return ['journal_edited','journal_deleted','price_changed','no_workout'].includes(entry.type) ||
+    (Number(entry.amount)||0) === 0;
+}
+
+function normalizeEntryAmount(type, amount) {
+  if (Number.isNaN(amount)) return amount;
+  if (type === 'workout_done') return -Math.abs(amount);
+  if (type === 'money_added')  return  Math.abs(amount);
+  return amount;
+}
+
+function recalculateFromLogs() {
+  let balance = 0; let workouts = 0;
+  [...state.logs].reverse().forEach(e => {
+    e.monthKey = deriveMonthKey(e.date);
+    balance   += Number(e.amount)||0;
+    e.balanceAfter = balance;
+    if (e.type === 'workout_done') workouts++;
+  });
+  state.balance      = balance;
+  state.totalWorkouts = workouts;
+}
+
+// ============================================================
+//  הגדרות – רינדור
+// ============================================================
+function renderSettings() {
+  const priceInput  = document.getElementById('price-input');
+  const themeToggle = document.getElementById('theme-toggle');
+  if (priceInput)  priceInput.value   = state.workoutPrice;
+  if (themeToggle) themeToggle.checked = (state.theme || 'light') === 'dark';
+  const iosNotice = document.getElementById('ios-pwa-notice');
+  if (iosNotice) iosNotice.style.display = isIOS() ? 'block' : 'none';
+  updateCloudSyncStatus();
+  updateDebugPanel();
+}
+
+// ============================================================
+//  ערכת נושא
+// ============================================================
+function applyTheme(theme) {
+  const t = theme === 'dark' ? 'dark' : 'light';
+  state.theme = t;
+  document.documentElement.setAttribute('data-theme', t);
+  const meta = document.getElementById('theme-color-meta');
+  if (meta) meta.setAttribute('content', THEME_META_COLORS[t]);
+}
+
+function toggleThemeSetting() {
+  const toggle = document.getElementById('theme-toggle');
+  const next   = toggle?.checked ? 'dark' : 'light';
+  applyTheme(next);
+  saveUserDoc();
+  showToast(next === 'dark' ? 'מצב לילה הופעל' : 'מצב בהיר הופעל', 'success');
+}
+
+// ============================================================
+//  עדכון מסך בית
+// ============================================================
+function updateHomeUI() {
+  const balDisp = document.getElementById('balance-display');
+  const balMeta = document.getElementById('balance-meta');
+  const totalEl = document.getElementById('total-workouts-display');
+  const remEl   = document.getElementById('remaining-workouts-display');
+  const sumEl   = document.getElementById('summary-text');
+  const todayEl = document.getElementById('today-report-status');
+  if (!balDisp) return;
+
+  const { balance, workoutPrice: price, totalWorkouts: wc } = state;
+  const remaining = price > 0 ? Math.floor(balance / price) : 0;
+
+  balDisp.textContent = `₪${formatNum(balance)}`;
+  balDisp.className   = `balance-amount${balance < 0 ? ' negative' : ''}`;
+
+  if (balance < 0) {
+    balMeta.textContent = `מינוס של ₪${formatNum(Math.abs(balance))}`;
+    balMeta.className   = 'balance-meta negative';
+  } else if (balance === 0) {
+    balMeta.textContent = 'הקופה ריקה';
+    balMeta.className   = 'balance-meta';
+  } else {
+    balMeta.textContent = `מחיר אימון: ₪${formatNum(price)}`;
+    balMeta.className   = 'balance-meta';
+  }
+
+  if (totalEl) totalEl.textContent = wc;
+  if (remEl)   remEl.textContent   = remaining > 0 ? remaining : 0;
+
+  if (sumEl) {
+    if (balance <= 0) {
+      sumEl.textContent = 'יש להוסיף כסף לקופה כדי לרשום אימונים';
+      sumEl.className   = 'summary-card warning';
+    } else if (remaining <= 1) {
+      sumEl.textContent = remaining === 1 ? 'נשאר אימון אחד בקופה – כדאי לחדש' : 'הוסף כסף לקופה לאימון הבא';
+      sumEl.className   = 'summary-card warning';
+    } else {
+      sumEl.textContent = `ביצעת ${wc} אימונים. נשארו ${remaining} אימונים ביתרה.`;
+      sumEl.className   = 'summary-card';
+    }
+  }
+
+  if (todayEl) {
+    if (!state.todayReport) {
+      todayEl.textContent = 'היום עדיין לא דווח';
+      todayEl.className   = 'today-report-status today-none';
+    } else if (state.todayReport.type === 'workout_done') {
+      todayEl.textContent = 'היום דווח: היה אימון ✓';
+      todayEl.className   = 'today-report-status today-workout';
+    } else {
+      todayEl.textContent = 'היום דווח: לא היה אימון';
+      todayEl.className   = 'today-report-status today-skip';
+    }
+  }
+}
+
+function updateCloudSyncStatus(msg) {
+  const el = document.getElementById('cloud-sync-status');
+  if (!el) return;
+  if (msg) { el.textContent = msg; updateDebugPanel(); return; }
+  if (!_cloudReady) {
+    el.textContent = _cloudInitError ? `ענן: לא מחובר (${_cloudInitError})` : 'ענן: לא מחובר';
+    updateDebugPanel();
+    return;
+  }
+  if (_isHydrating) {
+    el.textContent = 'טוען נתונים מהענן...';
+    updateDebugPanel();
+    return;
+  }
+  if (_lastCloudError) {
+    el.textContent = `שגיאת ענן: ${_lastCloudError}`;
+    updateDebugPanel();
+    return;
+  }
+  if (_realtimeReady) {
+    el.textContent = 'סנכרון חי פעיל בין מכשירים ✓';
+    updateDebugPanel();
+    return;
+  }
+  if (_lastCloudSyncAt instanceof Date && !isNaN(_lastCloudSyncAt)) {
+    el.textContent = `סנכרון אחרון: ${formatDateTime(_lastCloudSyncAt)}`;
+    updateDebugPanel();
+    return;
+  }
+  el.textContent = 'מחובר לענן ✓';
+  updateDebugPanel();
+}
+
+function setDebugValue(id, value) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = String(value);
+}
+
+function updateDebugPanel() {
+  setDebugValue('debug-cloud-ready', _cloudReady ? 'true' : 'false');
+  setDebugValue('debug-hydrating', _isHydrating ? 'true' : 'false');
+  setDebugValue('debug-realtime-ready', _realtimeReady ? 'true' : 'false');
+  setDebugValue('debug-profile-id', SHARED_PROFILE_ID);
+  setDebugValue('debug-last-sync', _lastCloudSyncAt ? formatDateTime(_lastCloudSyncAt) : '-');
+  setDebugValue('debug-last-error', _lastCloudError || '-');
+  setDebugValue('debug-logs-count', Array.isArray(state.logs) ? state.logs.length : 0);
+  setDebugValue('debug-today-report', state.todayReport?.type || 'none');
+  setDebugValue('debug-online', navigator.onLine ? 'true' : 'false');
+  setDebugValue('debug-user-agent', navigator.userAgent || '-');
 }
 
 function refreshAllUI() {
@@ -827,760 +1254,248 @@ function refreshAllUI() {
 }
 
 // ============================================================
-//  לוג פעולות
-// ============================================================
-
-/** מוסיף רשומה ללוג */
-function addLogEntry({ type, title, amount, balanceAfter, note }) {
-  const now      = new Date();
-  const dateStr  = now.toLocaleDateString('he-IL', { year: 'numeric', month: '2-digit', day: '2-digit' });
-  const timeStr  = now.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
-  const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-
-  state.logs.unshift({
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-    type,
-    title,
-    amount,
-    balanceAfter,
-    note: note || '',
-    date: dateStr,
-    time: timeStr,
-    monthKey
-  });
-}
-
-/** מרנדר את כל הלוג */
-function renderJournal() {
-  const container = document.getElementById('journal-container');
-  if (!container) return;
-
-  if (state.logs.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon">📋</div>
-        <h3>היומן עדיין ריק</h3>
-        <p>כאן יופיעו כל הפעולות שביצעת ועריכות שבוצעו</p>
-      </div>`;
-    return;
-  }
-
-  // קיבוץ לפי חודש
-  const grouped = {};
-  state.logs.forEach(entry => {
-    if (!grouped[entry.monthKey]) grouped[entry.monthKey] = [];
-    grouped[entry.monthKey].push(entry);
-  });
-
-  // מיון חודשים בסדר יורד
-  const sortedMonths = Object.keys(grouped).sort().reverse();
-
-  let html = '';
-  sortedMonths.forEach(monthKey => {
-    const [year, month] = monthKey.split('-');
-    const label = new Date(year, Number(month) - 1, 1)
-      .toLocaleDateString('he-IL', { year: 'numeric', month: 'long' });
-
-    html += `<div class="log-month-header">${label}</div><div class="log-month-group">`;
-    grouped[monthKey].forEach(entry => { html += buildJournalEntryHTML(entry); });
-    html += `</div>`;
-  });
-
-  container.innerHTML = html;
-}
-
-/** בונה HTML לרשומת יומן בודדת */
-function buildJournalEntryHTML(entry) {
-  const CONFIG = {
-    workout_done:  { icon: '🏋️', color: 'red',   label: 'אימון'          },
-    money_added:   { icon: '💰', color: 'green', label: 'הוספת כסף'      },
-    balance_set:   { icon: '✏️', color: 'blue',  label: 'עדכון יתרה'     },
-    price_changed: { icon: '🏷️', color: 'blue',  label: 'שינוי מחיר'     },
-    reminder:      { icon: '🔔', color: 'gray',  label: 'תזכורת'         },
-    journal_edited:{ icon: '🧾', color: 'gray',  label: 'עריכת יומן'      },
-    journal_deleted:{ icon: '🗑️', color: 'gray', label: 'מחיקת יומן'      },
-  };
-
-  const cfg = CONFIG[entry.type] || { icon: '📝', color: 'gray', label: entry.type };
-
-  const amountHTML = entry.amount !== 0
-    ? `<span class="amount ${entry.amount > 0 ? 'positive' : 'negative'}">${entry.amount > 0 ? '+' : ''}₪${formatNum(Math.abs(entry.amount))}</span>`
-    : '';
-
-  const noteHTML = entry.note
-    ? `<div class="log-note">${escapeHTML(entry.note)}</div>`
-    : '';
-
-  const dateTimeHTML = `<div class="log-entry-datetime" dir="rtl"><span>${entry.date}</span><span>${entry.time}</span></div>`;
-
-  const editButtonHTML = `
-    <button
-      class="journal-edit-btn"
-      type="button"
-      data-entry-id="${escapeHTML(entry.id)}"
-      data-entry-title="${escapeHTML(entry.title)}"
-      data-entry-amount="${escapeHTML(entry.amount)}"
-      data-entry-note="${escapeHTML(entry.note || '')}"
-      onclick="openEditEntryFromButton(this)">
-      עריכה
-    </button>`;
-
-  return `
-    <div class="log-entry">
-      <div class="log-entry-icon log-icon-${cfg.color}">${cfg.icon}</div>
-      <div class="log-entry-body">
-        <div class="log-entry-title">${escapeHTML(entry.title)}</div>
-        <div class="log-entry-meta">
-          ${dateTimeHTML}
-          ${noteHTML}
-        </div>
-        <div class="journal-entry-actions">${editButtonHTML}</div>
-      </div>
-      <div class="log-entry-amounts">
-        ${amountHTML}
-        <div class="log-balance-after">₪${formatNum(entry.balanceAfter)}</div>
-      </div>
-    </div>`;
-}
-
-function renderMonthlySummary() {
-  const container = document.getElementById('monthly-summary-container');
-  if (!container) return;
-
-  if (state.logs.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon">📆</div>
-        <h3>אין עדיין נתונים חודשיים</h3>
-        <p>ברגע שיתחילו להירשם אימונים, יופיע כאן סיכום חודשי מסודר</p>
-      </div>`;
-    return;
-  }
-
-  const currentMonthKey = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-  const summaries = buildMonthlySummaries();
-
-  container.innerHTML = summaries.map(summary => {
-    const isCurrent = summary.monthKey === currentMonthKey;
-    return `
-      <div class="summary-month-card${isCurrent ? ' current' : ''}">
-        <div class="summary-month-header-row">
-          <div class="summary-month-title">${escapeHTML(summary.label)}</div>
-          <div class="summary-month-badge">${isCurrent ? 'החודש' : 'סיכום'}</div>
-        </div>
-        <div class="summary-grid">
-          <div class="summary-stat">
-            <div class="summary-stat-value">${summary.workouts}</div>
-            <div class="summary-stat-label">אימונים</div>
-          </div>
-          <div class="summary-stat">
-            <div class="summary-stat-value">₪${formatNum(summary.spent)}</div>
-            <div class="summary-stat-label">סה"כ ירד</div>
-          </div>
-          <div class="summary-stat">
-            <div class="summary-stat-value">₪${formatNum(summary.added)}</div>
-            <div class="summary-stat-label">סה"כ נוסף</div>
-          </div>
-        </div>
-      </div>`;
-  }).join('');
-}
-
-function buildMonthlySummaries() {
-  const grouped = new Map();
-
-  state.logs.forEach(entry => {
-    const monthKey = entry.monthKey || deriveMonthKeyFromDate(entry.date);
-    if (!grouped.has(monthKey)) {
-      const [year, month] = monthKey.split('-');
-      grouped.set(monthKey, {
-        monthKey,
-        label: new Date(Number(year), Number(month) - 1, 1).toLocaleDateString('he-IL', { year: 'numeric', month: 'long' }),
-        workouts: 0,
-        spent: 0,
-        added: 0
-      });
-    }
-
-    const target = grouped.get(monthKey);
-    if (entry.type === 'workout_done') {
-      target.workouts += 1;
-      target.spent += Math.abs(Number(entry.amount) || 0);
-    }
-    if ((Number(entry.amount) || 0) > 0) {
-      target.added += Number(entry.amount) || 0;
-    }
-  });
-
-  return Array.from(grouped.values()).sort((left, right) => right.monthKey.localeCompare(left.monthKey));
-}
-
-function openEditEntryFromButton(button) {
-  openEditEntry(
-    button.dataset.entryId,
-    button.dataset.entryTitle || '',
-    Number(button.dataset.entryAmount) || 0,
-    button.dataset.entryNote || ''
-  );
-}
-
-function openEditEntry(entryId, entryTitle, entryAmount, entryNote) {
-  const entry = state.logs.find(item => item.id === entryId);
-  if (!entry) return;
-
-  _editingEntryId = entryId;
-  document.getElementById('edit-entry-title').value = entryTitle || entry.title || '';
-  const amountInput = document.getElementById('edit-entry-amount');
-  amountInput.value = Number.isFinite(entryAmount) ? entryAmount : (Number(entry.amount) || 0);
-  amountInput.disabled = isZeroAmountEntry(entry);
-  document.getElementById('edit-entry-note').value = entryNote || entry.note || '';
-  showSubScreen('edit-entry', true);
-}
-
-function saveEditedEntry() {
-  if (!_editingEntryId) return;
-
-  const entry = state.logs.find(item => item.id === _editingEntryId);
-  if (!entry) return;
-
-  const titleInput = document.getElementById('edit-entry-title');
-  const amountInput = document.getElementById('edit-entry-amount');
-  const noteInput = document.getElementById('edit-entry-note');
-  const parsedAmount = parseFloat(amountInput.value);
-  const nextAmount = amountInput.disabled ? Number(entry.amount) || 0 : normalizeEntryAmount(entry.type, parsedAmount);
-
-  if (!titleInput.value.trim() || Number.isNaN(nextAmount)) {
-    showToast('יש למלא כותרת וסכום תקין', 'error');
-    return;
-  }
-
-  const before = {
-    title: entry.title,
-    amount: entry.amount,
-    note: entry.note
-  };
-
-  entry.title = titleInput.value.trim();
-  entry.amount = nextAmount;
-  entry.note = noteInput.value.trim();
-
-  recalculateStateFromLogs();
-
-  addLogEntry({
-    type: 'journal_edited',
-    title: 'נערכה רשומה ביומן',
-    amount: 0,
-    balanceAfter: state.balance,
-    note: `"${before.title}" עודכנה: ₪${formatNum(before.amount)} -> ₪${formatNum(nextAmount)}`
-  });
-
-  recalculateStateFromLogs();
-  saveState();
-  refreshAllUI();
-  hideSubScreen();
-  showToast('הרשומה עודכנה', 'success');
-}
-
-function deleteEditedEntry() {
-  if (!_editingEntryId) return;
-
-  const entry = state.logs.find(item => item.id === _editingEntryId);
-  if (!entry) return;
-
-  showConfirm(
-    'מחיקת רשומה',
-    'הרשומה תימחק מהיומן. פעולת המחיקה עצמה תישמר ביומן הבקרה.',
-    () => {
-      const removedEntry = { ...entry };
-      state.logs = state.logs.filter(item => item.id !== _editingEntryId);
-      recalculateStateFromLogs();
-      addLogEntry({
-        type: 'journal_deleted',
-        title: 'נמחקה רשומה מהיומן',
-        amount: 0,
-        balanceAfter: state.balance,
-        note: `נמחקה הרשומה "${removedEntry.title}" בסכום ₪${formatNum(Math.abs(Number(removedEntry.amount) || 0))}`
-      });
-      recalculateStateFromLogs();
-      saveState();
-      refreshAllUI();
-      hideSubScreen();
-      showToast('הרשומה נמחקה', 'warning');
-    }
-  );
-}
-
-function recalculateStateFromLogs() {
-  let runningBalance = 0;
-  let workoutCount = 0;
-  const ordered = [...state.logs].reverse();
-
-  ordered.forEach(entry => {
-    entry.monthKey = deriveMonthKeyFromDate(entry.date);
-    runningBalance += Number(entry.amount) || 0;
-    entry.balanceAfter = runningBalance;
-    if (entry.type === 'workout_done') {
-      workoutCount += 1;
-    }
-  });
-
-  state.balance = runningBalance;
-  state.totalWorkouts = workoutCount;
-}
-
-function isZeroAmountEntry(entry) {
-  return ['reminder', 'journal_edited', 'price_changed'].includes(entry.type) || (Number(entry.amount) || 0) === 0;
-}
-
-function normalizeEntryAmount(type, amount) {
-  if (Number.isNaN(amount)) return amount;
-  if (type === 'workout_done') return -Math.abs(amount);
-  if (type === 'money_added') return Math.abs(amount);
-  if (['reminder', 'journal_edited', 'price_changed'].includes(type)) return 0;
-  return amount;
-}
-
-function deriveMonthKeyFromDate(dateStr) {
-  if (typeof dateStr !== 'string') {
-    return `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-  }
-
-  const parts = dateStr.split(/[./-]/).map(part => part.trim());
-  if (parts.length !== 3) {
-    return `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-  }
-
-  const [day, month, year] = parts;
-  return `${year}-${String(month).padStart(2, '0')}`;
-}
-
-// ============================================================
-//  רינדור הגדרות
-// ============================================================
-function renderSettings() {
-  const priceInput = document.getElementById('price-input');
-  const timeInput  = document.getElementById('reminder-time-input');
-  const toggle     = document.getElementById('notifications-toggle');
-  const themeToggle = document.getElementById('theme-toggle');
-
-  if (priceInput) priceInput.value = state.workoutPrice;
-  if (timeInput)  timeInput.value  = state.reminderTime;
-  if (toggle)     toggle.checked   = state.notificationsEnabled;
-  if (themeToggle) themeToggle.checked = (state.theme || 'light') === 'dark';
-
-  // הודעת iOS
-  const iosNotice = document.getElementById('ios-pwa-notice');
-  if (iosNotice) iosNotice.style.display = isIOS() ? 'block' : 'none';
-
-  updateNotificationStatus();
-  updateReminderStatus();
-  updatePushStatus();
-  updateNotificationLimitations();
-  updateCloudSyncStatus();
-}
-
-function applyTheme(theme) {
-  const normalizedTheme = theme === 'dark' ? 'dark' : 'light';
-  state.theme = normalizedTheme;
-  document.documentElement.setAttribute('data-theme', normalizedTheme);
-  const themeMeta = document.getElementById('theme-color-meta');
-  if (themeMeta) {
-    themeMeta.setAttribute('content', THEME_META_COLORS[normalizedTheme]);
-  }
-}
-
-function toggleThemeSetting() {
-  const themeToggle = document.getElementById('theme-toggle');
-  const nextTheme = themeToggle?.checked ? 'dark' : 'light';
-  applyTheme(nextTheme);
-  saveState();
-  showToast(nextTheme === 'dark' ? 'מצב לילה הופעל' : 'מצב בהיר הופעל', 'success');
-}
-
-// ============================================================
 //  ייצוא / ייבוא
 // ============================================================
-
-/** מייצא גיבוי TXT */
 function exportData() {
-  const date = new Date().toISOString().split('T')[0];
-  const lines = [];
-
-  lines.push('===== גיבוי כושר =====');
-  lines.push(`תאריך: ${date}`);
-  lines.push('');
-  lines.push(`יתרה: ₪${formatNum(state.balance)}`);
-  lines.push(`מחיר אימון: ₪${formatNum(state.workoutPrice)}`);
-  lines.push(`סה"כ אימונים: ${state.totalWorkouts}`);
-  lines.push('');
-  lines.push('===== לוג פעולות =====');
-  state.logs.forEach(entry => {
-    const amountStr = entry.amount !== 0 ? ` | ${entry.amount > 0 ? '+' : ''}₪${formatNum(entry.amount)}` : '';
-    const noteStr   = entry.note ? ` | ${entry.note}` : '';
-    lines.push(`${entry.date} ${entry.time} | ${entry.title}${amountStr} | יתרה: ₪${formatNum(entry.balanceAfter)}${noteStr}`);
+  const date  = new Date().toISOString().split('T')[0];
+  const lines = [
+    '===== גיבוי כושר =====', `תאריך: ${date}`, '',
+    `יתרה: ₪${formatNum(state.balance)}`,
+    `מחיר אימון: ₪${formatNum(state.workoutPrice)}`,
+    `סה"כ אימונים: ${state.totalWorkouts}`, '',
+    '===== לוג פעולות ====='
+  ];
+  state.logs.forEach(e => {
+    const a = e.amount !== 0 ? ` | ${e.amount > 0 ? '+' : ''}₪${formatNum(e.amount)}` : '';
+    const n = e.note ? ` | ${e.note}` : '';
+    lines.push(`${e.date} ${e.time} | ${e.title}${a} | יתרה: ₪${formatNum(e.balanceAfter)}${n}`);
   });
-  lines.push('');
-  lines.push('===== נתונים גולמיים (לייבוא) =====');
-  lines.push(JSON.stringify(state));
-
-  const content = lines.join('\n');
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  lines.push('', '===== נתונים גולמיים =====', JSON.stringify(state));
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
   const url  = URL.createObjectURL(blob);
-
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = `fitness-backup-${date}.txt`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-
+  const a    = Object.assign(document.createElement('a'), { href: url, download: `fitness-backup-${date}.txt` });
+  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   showToast('גיבוי יוצא בהצלחה 📤', 'success');
 }
 
-/** פותח דיאלוג בחירת קובץ */
-function triggerImport() {
-  document.getElementById('import-file-input').click();
-}
+function triggerImport() { document.getElementById('import-file-input').click(); }
 
-/** מייבא גיבוי TXT */
 function importData(event) {
   const file = event.target.files[0];
   if (!file) return;
-
   const reader = new FileReader();
   reader.onload = e => {
     try {
-      const text = e.target.result;
-      // חיפוש השורה עם ה-JSON הגולמי (השורה האחרונה שאינה ריקה לאחר הכותרת)
-      const rawLine = text.split('\n').find(line => line.trim().startsWith('{'));
-      if (!rawLine) {
-        showToast('קובץ גיבוי לא תקין', 'error');
-        return;
+      const rawLine = e.target.result.split('\n').find(l => l.trim().startsWith('{'));
+      if (!rawLine) { showToast('קובץ גיבוי לא תקין', 'error'); return; }
+      const imp = JSON.parse(rawLine.trim());
+      if (typeof imp.balance !== 'number' || !Array.isArray(imp.logs)) {
+        showToast('קובץ גיבוי לא תקין', 'error'); return;
       }
-      const imported = JSON.parse(rawLine.trim());
-
-      // ולידציה בסיסית
-      if (typeof imported.balance !== 'number' || !Array.isArray(imported.logs)) {
-        showToast('קובץ גיבוי לא תקין', 'error');
-        return;
-      }
-
-      state = { ...DEFAULT_STATE, ...imported };
-      recalculateStateFromLogs();
-      applyTheme(state.theme || 'light');
-      saveState();
+      state = {
+        balance:      imp.balance      || 0,
+        workoutPrice: imp.workoutPrice || 80,
+        totalWorkouts:imp.totalWorkouts|| 0,
+        logs:         imp.logs         || [],
+        theme:        imp.theme        || 'light',
+        todayReport:  imp.todayReport  || null
+      };
+      recalculateFromLogs();
+      applyTheme(state.theme);
+      saveUserDoc();
       refreshAllUI();
       showToast('גיבוי יובא בהצלחה 📥', 'success');
-    } catch {
-      showToast('שגיאה בייבוא הגיבוי', 'error');
-    }
+    } catch { showToast('שגיאה בייבוא הגיבוי', 'error'); }
   };
   reader.readAsText(file);
-  // מאפס כדי שניתן לייבא אותו קובץ פעמיים
   event.target.value = '';
 }
 
 // ============================================================
-//  איפוס נתונים (אישור כפול)
+//  איפוס
 // ============================================================
 function resetData() {
-  showConfirm(
-    'איפוס נתונים',
-    'כל הנתונים יימחקו לצמיתות. פעולה זו אינה הפיכה. האם להמשיך?',
-    () => {
-      state = { ...DEFAULT_STATE };
-      localStorage.removeItem('_last-reminder');
+  showConfirm('איפוס נתונים', 'כל הנתונים יימחקו לצמיתות. האם להמשיך?', async () => {
+    try {
+      await initFirebaseCloud();
+      await resetCloudData();
+
+      state = { balance:0, workoutPrice:80, totalWorkouts:0, logs:[], theme:'light', todayReport:null };
       applyTheme(state.theme);
-      saveState();
       refreshAllUI();
       showScreen('home');
+      updateCloudSyncStatus('הנתונים אופסו בענן');
       showToast('כל הנתונים אופסו', 'warning');
+    } catch (e) {
+      console.warn('[Fitness] resetData failed:', e);
+      showToast('איפוס הנתונים נכשל', 'error');
     }
-  );
-}
-
-// ============================================================
-//  עדכון UI – מסך הבית
-// ============================================================
-function updateHomeUI() {
-  const balanceDisplay   = document.getElementById('balance-display');
-  const balanceMeta      = document.getElementById('balance-meta');
-  const totalWorkouts    = document.getElementById('total-workouts-display');
-  const remainingDisplay = document.getElementById('remaining-workouts-display');
-  const summaryText      = document.getElementById('summary-text');
-
-  if (!balanceDisplay) return;
-
-  const { balance, workoutPrice: price, totalWorkouts: workoutCount } = state;
-  const remaining = price > 0 ? Math.floor(balance / price) : 0;
-
-  // יתרה
-  balanceDisplay.textContent = `₪${formatNum(balance)}`;
-  balanceDisplay.className   = `balance-amount${balance < 0 ? ' negative' : ''}`;
-
-  // מטא
-  if (balance < 0) {
-    balanceMeta.textContent = `מינוס של ₪${formatNum(Math.abs(balance))}`;
-    balanceMeta.className   = 'balance-meta negative';
-  } else if (balance === 0) {
-    balanceMeta.textContent = 'הקופה ריקה';
-    balanceMeta.className   = 'balance-meta';
-  } else {
-    balanceMeta.textContent = `מחיר אימון: ₪${formatNum(price)}`;
-    balanceMeta.className   = 'balance-meta';
-  }
-
-  // סטטיסטיקות
-  totalWorkouts.textContent    = workoutCount;
-  remainingDisplay.textContent = remaining > 0 ? remaining : 0;
-
-  // תקציר
-  if (balance <= 0) {
-    summaryText.textContent = 'יש להוסיף כסף לקופה כדי לרשום אימונים';
-    summaryText.className   = 'summary-card warning';
-  } else if (remaining <= 1) {
-    summaryText.textContent = remaining === 1
-      ? 'נשאר אימון אחד בקופה – כדאי לחדש'
-      : 'הוסף כסף לקופה לאימון הבא';
-    summaryText.className = 'summary-card warning';
-  } else {
-    summaryText.textContent = `ביצעת ${workoutCount} אימונים. נשארו ${remaining} אימונים ביתרה.`;
-    summaryText.className   = 'summary-card';
-  }
+  });
 }
 
 // ============================================================
 //  Toast
 // ============================================================
 let _toastTimer;
-
 function showToast(message, type = 'success') {
-  const toast = document.getElementById('toast');
-  if (!toast) return;
-
+  const t = document.getElementById('toast');
+  if (!t) return;
   clearTimeout(_toastTimer);
-  toast.textContent = message;
-  toast.className   = `toast toast-${type} show`;
-
-  _toastTimer = setTimeout(() => toast.classList.remove('show'), 3200);
+  t.textContent = message;
+  t.className   = `toast toast-${type} show`;
+  _toastTimer   = setTimeout(() => t.classList.remove('show'), 3200);
 }
 
 // ============================================================
-//  דיאלוג אישור
+//  Confirm dialog
 // ============================================================
-let _confirmOkCb     = null;
-let _confirmCancelCb = null;
+let _confirmOkCb = null, _confirmCancelCb = null;
 
 function showConfirm(title, message, onOk, onCancel) {
-  const overlay  = document.getElementById('confirm-overlay');
-  const titleEl  = document.getElementById('confirm-title');
-  const msgEl    = document.getElementById('confirm-message');
-
-  if (!overlay) return;
-
-  titleEl.textContent = title;
-  msgEl.textContent   = message;
-  _confirmOkCb        = onOk || null;
-  _confirmCancelCb    = onCancel || null;
-
+  const overlay = document.getElementById('confirm-overlay');
+  if (!overlay) { if (confirm(`${title}\n${message}`)) { if (onOk) onOk(); } return; }
+  document.getElementById('confirm-title').textContent   = title;
+  document.getElementById('confirm-message').textContent = message;
+  _confirmOkCb = onOk || null; _confirmCancelCb = onCancel || null;
   overlay.style.display = 'flex';
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => overlay.classList.add('show'));
-  });
+  requestAnimationFrame(() => requestAnimationFrame(() => overlay.classList.add('show')));
 }
 
 function confirmOk() {
   _closeConfirm();
-  if (_confirmOkCb) { const cb = _confirmOkCb; _confirmOkCb = null; cb(); }
+  const cb = _confirmOkCb; _confirmOkCb = null;
+  if (cb) cb();
 }
 
 function confirmCancel() {
   _closeConfirm();
-  if (_confirmCancelCb) { const cb = _confirmCancelCb; _confirmCancelCb = null; cb(); }
-  // שחרר נעילת אימון אם הדיאלוג נפתח ממנה
+  const cb = _confirmCancelCb; _confirmCancelCb = null;
+  if (cb) cb();
   _workoutLocked = false;
 }
 
 function _closeConfirm() {
-  const overlay = document.getElementById('confirm-overlay');
-  if (!overlay) return;
-  overlay.classList.remove('show');
-  setTimeout(() => { overlay.style.display = 'none'; }, 280);
+  const o = document.getElementById('confirm-overlay');
+  if (!o) return;
+  o.classList.remove('show');
+  setTimeout(() => { o.style.display = 'none'; }, 280);
 }
 
 // ============================================================
-//  יצירת אייקון canvas לאפל (apple-touch-icon)
+//  Apple touch icon
 // ============================================================
-
-/** מצייר דמבל פשוט על canvas ומחזיר data-URL */
 function generateCanvasIcon(size) {
   const canvas = document.createElement('canvas');
-  canvas.width  = size;
-  canvas.height = size;
+  canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
-
-  // רקע כחול עגול
   const r = size * 0.22;
   ctx.fillStyle = '#007AFF';
   ctx.beginPath();
   _roundRectPath(ctx, 0, 0, size, size, r);
   ctx.fill();
-
-  // דמבל (scaled from 100×100)
   ctx.fillStyle = 'white';
   const s = size / 100;
-
-  _fillRoundRect(ctx, 4*s,  38*s, 6*s,  24*s, 3*s); // צלחת שמאל
-  _fillRoundRect(ctx, 10*s, 33*s, 14*s, 34*s, 4*s); // משקולת שמאל
-  _fillRoundRect(ctx, 24*s, 44*s, 52*s, 12*s, 3*s); // מוט
-  _fillRoundRect(ctx, 76*s, 33*s, 14*s, 34*s, 4*s); // משקולת ימין
-  _fillRoundRect(ctx, 90*s, 38*s, 6*s,  24*s, 3*s); // צלחת ימין
-
+  _fillRoundRect(ctx,  4*s, 38*s,  6*s, 24*s, 3*s);
+  _fillRoundRect(ctx, 10*s, 33*s, 14*s, 34*s, 4*s);
+  _fillRoundRect(ctx, 24*s, 44*s, 52*s, 12*s, 3*s);
+  _fillRoundRect(ctx, 76*s, 33*s, 14*s, 34*s, 4*s);
+  _fillRoundRect(ctx, 90*s, 38*s,  6*s, 24*s, 3*s);
   return canvas.toDataURL('image/png');
 }
 
 function _roundRectPath(ctx, x, y, w, h, r) {
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
 }
 
 function _fillRoundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  _roundRectPath(ctx, x, y, w, h, r);
-  ctx.fill();
+  ctx.beginPath(); _roundRectPath(ctx, x, y, w, h, r); ctx.fill();
 }
 
 // ============================================================
-//  עזרים
-// ============================================================
-
-/** מעצב מספר לעברית – ₪1,234 */
-function formatNum(n) {
-  if (typeof n !== 'number' || isNaN(n)) return '0';
-  return Math.round(n).toLocaleString('he-IL');
-}
-
-function formatDateTime(date) {
-  if (!(date instanceof Date) || isNaN(date)) return '-';
-  return date.toLocaleString('he-IL', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
-}
-
-/** מגן מפני XSS */
-function escapeHTML(str) {
-  if (!str) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-/** זיהוי iOS */
-function isIOS() {
-  return (
-    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
-  );
-}
-
-// ============================================================
-//  רישום Service Worker
+//  Service Worker
 // ============================================================
 async function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return null;
-  if (_swRegistration) return _swRegistration;
+
+  if (isIOS()) {
+    try {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(reg => reg.unregister()));
+      console.log('[Fitness] iOS SW disabled to avoid stale cache issues');
+    } catch (e) {
+      console.warn('[Fitness] iOS SW cleanup failed:', e);
+    }
+    return null;
+  }
 
   try {
-    _swRegistration = await navigator.serviceWorker.register('sw.js');
-    console.log('[FitnessTracker] SW registered, scope:', _swRegistration.scope);
-    return _swRegistration;
-  } catch (err) {
-    console.warn('[FitnessTracker] SW registration failed:', err);
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    console.log('[Fitness] SW registered:', reg.scope);
+    return reg;
+  } catch (e) {
+    console.warn('[Fitness] SW registration failed:', e);
     return null;
   }
 }
 
 // ============================================================
-//  Enter Key – שדות קלט
+//  מקשי Enter
 // ============================================================
 function setupKeyboardHandlers() {
-  document.getElementById('add-money-input')
-    ?.addEventListener('keydown', e => { if (e.key === 'Enter') addMoney(); });
-  document.getElementById('add-money-note')
-    ?.addEventListener('keydown', e => { if (e.key === 'Enter') addMoney(); });
-
-  document.getElementById('set-balance-input')
-    ?.addEventListener('keydown', e => { if (e.key === 'Enter') setBalance(); });
-  document.getElementById('set-balance-note')
-    ?.addEventListener('keydown', e => { if (e.key === 'Enter') setBalance(); });
-
-  document.getElementById('edit-entry-title')
-    ?.addEventListener('keydown', e => { if (e.key === 'Enter') saveEditedEntry(); });
-  document.getElementById('edit-entry-amount')
-    ?.addEventListener('keydown', e => { if (e.key === 'Enter') saveEditedEntry(); });
-  document.getElementById('edit-entry-note')
-    ?.addEventListener('keydown', e => { if (e.key === 'Enter') saveEditedEntry(); });
+  [
+    ['add-money-input',  addMoney],
+    ['add-money-note',   addMoney],
+    ['set-balance-input',setBalance],
+    ['set-balance-note', setBalance],
+    ['edit-entry-title', saveEditedEntry],
+    ['edit-entry-amount',saveEditedEntry],
+    ['edit-entry-note',  saveEditedEntry],
+  ].forEach(([id, fn]) => {
+    document.getElementById(id)?.addEventListener('keydown', e => { if (e.key === 'Enter') fn(); });
+  });
 }
 
 // ============================================================
 //  אתחול
 // ============================================================
 async function init() {
-  // טוען state מהשרת (עם fallback ללוקאלי)
   await hydrateState();
-  recalculateStateFromLogs();
+  recalculateFromLogs();
   applyTheme(state.theme || 'light');
-
-  // עדכון UI ראשוני
   refreshAllUI();
+  updateDebugPanel();
 
-  // apple-touch-icon דינמי
   try {
-    const iconDataURL = generateCanvasIcon(192);
+    const iconURL = generateCanvasIcon(192);
     const link = document.getElementById('apple-touch-icon');
-    if (link) link.href = iconDataURL;
-  } catch (e) {
-    console.warn('[FitnessTracker] Canvas icon generation failed:', e);
-  }
+    if (link) link.href = iconURL;
+  } catch (e) { /* ignore */ }
 
-  // הגדרת בדיקת תזכורת
-  setupReminderCheck();
-
-  // רישום Service Worker
   await registerServiceWorker();
-
-  // הרשמת Push מהענן כשמתאים
-  if (state.notificationsEnabled && Notification.permission === 'granted') {
-    await syncCloudPushToken();
-  }
-
-  // מקשי Enter
   setupKeyboardHandlers();
-
-  // רענון במשיכה על מסך הבית
   setupPullToRefresh();
 
-  // בדיקה חוזרת כשחוזרים לאפליקציה
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) checkReminder();
+  document.addEventListener('visibilitychange', async () => {
+    if (!document.hidden && !_realtimeReady) {
+      await hydrateState();
+      refreshAllUI();
+    }
+    updateDebugPanel();
   });
-  window.addEventListener('focus', checkReminder);
 
+  window.addEventListener('focus', async () => {
+    if (!_realtimeReady) {
+      await hydrateState();
+      refreshAllUI();
+    }
+    updateDebugPanel();
+  });
+
+  window.addEventListener('online', updateDebugPanel);
+  window.addEventListener('offline', updateDebugPanel);
 }
 
 document.addEventListener('DOMContentLoaded', init);

@@ -73,6 +73,55 @@ body {
   overflow: hidden;
 }
 
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(242, 242, 247, 0.82);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 9999;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease;
+}
+
+:root[data-theme='dark'] .loading-overlay {
+  background: rgba(11, 18, 32, 0.72);
+}
+
+.loading-overlay.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.loading-card {
+  min-width: 220px;
+  max-width: 280px;
+  background: var(--card-bg);
+  border-radius: 20px;
+  padding: 22px 20px;
+  box-shadow: 0 16px 40px var(--shadow-strong);
+  text-align: center;
+}
+
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  border: 3px solid rgba(0, 122, 255, 0.18);
+  border-top-color: var(--blue);
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 /* ===========================
    מסכים
    =========================== */
@@ -291,6 +340,19 @@ body {
 /* ===========================
    כרטיס שאלת אימון יומי
    =========================== */
+/* סטטוס דיווח יומי */
+.today-report-status {
+  text-align: center;
+  padding: 10px 16px;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  margin: 4px 0 8px;
+}
+.today-none    { background: rgba(142,142,147,0.12); color: var(--gray); }
+.today-workout { background: rgba(52,199,89,0.15);   color: var(--green); }
+.today-skip    { background: rgba(255,149,0,0.15);    color: var(--orange); }
+
 .workout-question-card {
   background: var(--card-bg);
   border-radius: 18px;
@@ -744,6 +806,38 @@ body {
   margin-top: 10px;
   padding: 0 2px;
   min-height: 16px;
+}
+
+.debug-card {
+  padding-top: 12px;
+}
+
+.debug-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12px;
+}
+
+.debug-row:last-child {
+  border-bottom: none;
+}
+
+.debug-row span {
+  color: var(--text-sec);
+  direction: ltr;
+}
+
+.debug-row strong {
+  color: var(--text);
+  direction: ltr;
+  text-align: left;
+  max-width: 64%;
+  word-break: break-word;
+  font-weight: 600;
 }
 
 /* ===========================

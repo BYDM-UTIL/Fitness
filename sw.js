@@ -1,9 +1,9 @@
 // ============================================================
 //  Service Worker – Fitness Tracker PWA
-//  אסטרטגיה: Cache-First עם עדכון ברקע
+//  אסטרטגיה: Network-First לקבצי אפליקציה, Cache-First לאייקונים
 // ============================================================
 
-const CACHE_NAME = 'fitness-tracker-v3';
+const CACHE_NAME = 'fitness-tracker-v5';
 
 // קבצים לשמירה במטמון
 const ASSETS = [
@@ -59,70 +59,41 @@ self.addEventListener('fetch', event => {
   // דלג על בקשות שאינן לאתר שלנו
   if (url.origin !== self.location.origin) return;
 
+  const isAppShellRequest =
+    event.request.mode === 'navigate' ||
+    url.pathname === '/' ||
+    url.pathname.endsWith('/index.html') ||
+    url.pathname.endsWith('/app.js') ||
+    url.pathname.endsWith('/styles.css') ||
+    url.pathname.endsWith('/firebase-config.js') ||
+    url.pathname.endsWith('/manifest.webmanifest');
+
+  if (isAppShellRequest) {
+    event.respondWith(
+      fetch(event.request)
+        .then(response => {
+          if (response && response.status === 200 && response.type === 'basic') {
+            caches.open(CACHE_NAME).then(cache => cache.put(event.request, response.clone()));
+          }
+          return response;
+        })
+        .catch(() => caches.match(event.request).then(cached => cached || caches.match('./index.html')))
+    );
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request).then(cached => {
-      if (cached) {
-        // הגש מהמטמון ועדכן ברקע (stale-while-revalidate)
-        fetch(event.request)
-          .then(response => {
-            if (response && response.status === 200) {
-              caches.open(CACHE_NAME).then(cache =>
-                cache.put(event.request, response.clone())
-              );
-            }
-          })
-          .catch(() => {}); // שגיאת רשת – לא קריטי
+      if (cached) return cached;
 
-        return cached;
-      }
-
-      // אין במטמון – משיג מהרשת ושומר
       return fetch(event.request).then(response => {
         if (!response || response.status !== 200 || response.type !== 'basic') {
           return response;
         }
 
-        caches.open(CACHE_NAME).then(cache =>
-          cache.put(event.request, response.clone())
-        );
-
+        caches.open(CACHE_NAME).then(cache => cache.put(event.request, response.clone()));
         return response;
       });
-    })
-  );
-});
-
-// ===== Push Notifications =====
-// מוכן גם להתראות שנשלחות מקומית דרך registration.showNotification
-self.addEventListener('push', event => {
-  const data = event.data?.json() ?? {};
-  event.waitUntil(
-    self.registration.showNotification(data.title || 'כושר', {
-      body: data.body || 'תזכורת יומית 🏋️',
-      icon: './icons/icon.svg',
-      badge: './icons/icon.svg',
-      dir: 'rtl',
-      lang: 'he',
-      tag: data.tag || 'fitness-push-reminder',
-      renotify: true,
-    })
-  );
-});
-
-self.addEventListener('notificationclick', event => {
-  event.notification.close();
-  event.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
-      const existingClient = clientList.find(client => 'focus' in client);
-      if (existingClient) {
-        return existingClient.focus();
-      }
-
-      if (clients.openWindow) {
-        return clients.openWindow('./');
-      }
-
-      return undefined;
     })
   );
 });

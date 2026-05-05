@@ -1,8 +1,22 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /fitnessStates/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+    match /users/{uid} {
+      allow read, write: if uid == 'main-profile' || (
+        request.auth != null && request.auth.uid == uid
+      );
+
+      match /logs/{logId} {
+        allow read, write: if uid == 'main-profile' || (
+          request.auth != null && request.auth.uid == uid
+        );
+      }
+
+      match /dailyReports/{dateKey} {
+        allow read, write: if uid == 'main-profile' || (
+          request.auth != null && request.auth.uid == uid
+        );
+      }
     }
   }
 }

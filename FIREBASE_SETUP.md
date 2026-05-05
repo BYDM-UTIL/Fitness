@@ -44,6 +44,10 @@ npx firebase-tools deploy --only hosting
 2. Share -> Add to Home Screen
 3. Launch from the icon
 
+### iPhone note
+- In the current stable app mode, iPhone uses local reminders only.
+- Firebase cloud push registration is kept disabled on iPhone to avoid unstable registration failures.
+
 ## 8) Enable free cloud push (FCM)
 This setup is fully free and gives real cloud push delivery.
 
@@ -53,6 +57,8 @@ This setup is fully free and gives real cloud push delivery.
 4. Deploy hosting again.
 5. In app Settings -> Reminders, enable notifications and save.
 6. Confirm that status says Push cloud is active.
+
+This cloud push flow is intended for supported browsers/platforms. In the stabilized iPhone path, the app stays on local reminders only.
 
 ### Test cloud push for free
 1. Open Firebase Console -> Cloud Messaging -> Create campaign.

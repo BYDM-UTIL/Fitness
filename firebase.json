@@ -9,13 +9,12 @@
       "fitness.db",
       "fitness.db-*",
       "DEPLOY_FREE.md",
-      "render.yaml"
-    ],
-    "rewrites": [
-      {
-        "source": "**",
-        "destination": "/index.html"
-      }
+      "FIREBASE_SETUP.md",
+      "render.yaml",
+      "generate-icons.js",
+      "package.json",
+      "package-lock.json",
+      "firebase-config.example.js"
     ]
   },
   "firestore": {

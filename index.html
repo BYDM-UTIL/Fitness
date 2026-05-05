@@ -16,6 +16,12 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+<div id="loading-overlay" class="loading-overlay" aria-live="polite" aria-busy="true">
+  <div class="loading-card">
+    <div class="loading-spinner"></div>
+    <div id="loading-text">טוען נתונים מהענן...</div>
+  </div>
+</div>
 <div id="app">
 
   <!-- ===== מסך בית ===== -->
@@ -50,12 +56,15 @@
       <!-- תקציר טקסטואלי -->
       <div class="summary-card" id="summary-text">הגדר יתרה כדי להתחיל</div>
 
+      <!-- סטטוס דיווח יומי -->
+      <div id="today-report-status" class="today-report-status today-none">היום עדיין לא דווח</div>
+
       <!-- שאלת אימון יומי -->
       <div class="workout-question-card">
         <div class="workout-question-title">🏋️ היה אימון היום?</div>
         <div class="workout-question-buttons">
-          <button class="btn btn-primary btn-workout-answer" id="btn-workout" onclick="handleWorkout()">כן ✓</button>
-          <button class="btn btn-secondary btn-workout-answer" onclick="skipWorkout()">לא ✕</button>
+          <button class="btn btn-primary btn-workout-answer" id="btn-workout" onclick="handleWorkout()">כן, היה אימון ✓</button>
+          <button class="btn btn-secondary btn-workout-answer" onclick="skipWorkout()">לא היה אימון ✕</button>
         </div>
       </div>
 
@@ -121,40 +130,7 @@
         </div>
       </div>
 
-      <!-- תזכורות -->
-      <div class="settings-section">
-        <div class="settings-section-title">תזכורות</div>
-        <div class="settings-card">
-          <div class="settings-row">
-            <div class="settings-row-label">
-              <span class="settings-icon">🕘</span>
-              <span>שעת תזכורת יומית</span>
-            </div>
-            <div class="settings-row-value">
-              <input type="time" id="reminder-time-input" class="settings-input" value="09:00">
-            </div>
-          </div>
-          <div class="settings-row">
-            <div class="settings-row-label">
-              <span class="settings-icon">🔔</span>
-              <span>הפעל התראות</span>
-            </div>
-            <div class="settings-row-value">
-              <label class="toggle" role="switch" aria-label="הפעל התראות">
-                <input type="checkbox" id="notifications-toggle">
-                <span class="toggle-slider"></span>
-              </label>
-            </div>
-          </div>
-          <button class="btn btn-primary btn-sm" onclick="saveNotificationSettings()">שמור הגדרות</button>
-          <div style="height:10px"></div>
-          <button class="btn btn-secondary btn-sm" onclick="sendTestReminder()">שלח תזכורת לבדיקה</button>
-          <div id="notification-status" class="notification-status"></div>
-          <div id="push-status" class="notification-status"></div>
-          <div id="reminder-status" class="notification-status"></div>
-          <div id="notification-limitations" class="notification-status"></div>
-        </div>
-      </div>
+
 
       <div class="settings-section">
         <div class="settings-section-title">תצוגה</div>
@@ -183,9 +159,6 @@
           <p>1. פתח ב-Safari</p>
           <p>2. לחץ על כפתור השיתוף <strong>⬆️</strong></p>
           <p>3. בחר <strong>"הוסף למסך הבית"</strong></p>
-          <p style="margin-top:8px; color:#666; font-size:13px;">
-            לאחר ההתקנה אפשר לקבל התראות, אבל ברקע אמיתי iPhone עדיין עשוי להשהות את האפליקציה. לכן תזכורת מקומית לא תמיד תופיע כשהמכשיר נעול או כשהאפליקציה הושהתה.
-          </p>
         </div>
       </div>
 
@@ -194,6 +167,11 @@
         <div class="settings-section-title">ניהול נתונים</div>
         <div class="settings-card">
           <div id="cloud-sync-status" class="notification-status"></div>
+          <button class="btn btn-primary btn-full" onclick="refreshFromPull()">
+            <span class="btn-icon">☁️</span>
+            <span>סנכרן עכשיו מהענן</span>
+          </button>
+          <div style="height:10px"></div>
           <button class="btn btn-secondary btn-full" onclick="exportData()">
             <span class="btn-icon">📤</span>
             <span>ייצוא גיבוי TXT</span>
@@ -205,6 +183,22 @@
           </button>
           <!-- input מוסתר לפתיחת בחירת קובץ -->
           <input type="file" id="import-file-input" accept=".txt" style="display:none;" onchange="importData(event)">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Debug Sync</div>
+        <div class="settings-card debug-card">
+          <div class="debug-row"><span>cloudReady</span><strong id="debug-cloud-ready">-</strong></div>
+          <div class="debug-row"><span>hydrating</span><strong id="debug-hydrating">-</strong></div>
+          <div class="debug-row"><span>realtimeReady</span><strong id="debug-realtime-ready">-</strong></div>
+          <div class="debug-row"><span>profileId</span><strong id="debug-profile-id">-</strong></div>
+          <div class="debug-row"><span>lastSync</span><strong id="debug-last-sync">-</strong></div>
+          <div class="debug-row"><span>lastError</span><strong id="debug-last-error">-</strong></div>
+          <div class="debug-row"><span>logsCount</span><strong id="debug-logs-count">-</strong></div>
+          <div class="debug-row"><span>todayReport</span><strong id="debug-today-report">-</strong></div>
+          <div class="debug-row"><span>online</span><strong id="debug-online">-</strong></div>
+          <div class="debug-row"><span>userAgent</span><strong id="debug-user-agent">-</strong></div>
         </div>
       </div>
 
@@ -320,8 +314,32 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js"></script>
 <script src="firebase-config.js"></script>
+<script>
+  (function () {
+    var isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+    if (!isiOS || !('serviceWorker' in navigator)) return;
+
+    navigator.serviceWorker.getRegistrations().then(function (regs) {
+      if (!regs.length) return;
+
+      return Promise.all(regs.map(function (reg) { return reg.unregister(); })).then(function () {
+        if (!sessionStorage.getItem('ios-sw-reset-done')) {
+          sessionStorage.setItem('ios-sw-reset-done', '1');
+          location.reload();
+        }
+      });
+    }).catch(function () {});
+  })();
+
+  // Failsafe: אם JS ראשי לא השלים אתחול (למשל עקב cache ישן), אל תחסום את כל ה-UI.
+  window.setTimeout(function () {
+    var overlay = document.getElementById('loading-overlay');
+    if (overlay) overlay.classList.remove('show');
+  }, 12000);
+</script>
 <script src="app.js"></script>
 </body>
 </html>
