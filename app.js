@@ -12,7 +12,9 @@ const DEFAULT_STATE = {
   reminderTime: '09:00',
   notificationsEnabled: false,
   totalWorkouts: 0,
-  logs: []
+  logs: [],
+  lastReminderAt: null,
+  lastReminderDateKey: ''
 };
 
 // ============================================================
@@ -419,7 +421,7 @@ function updatePrice() {
 // ============================================================
 
 /** שומר הגדרות תזכורת */
-function saveNotificationSettings() {
+async function saveNotificationSettings() {
   const timeInput = document.getElementById('reminder-time-input');
   const toggle    = document.getElementById('notifications-toggle');
 
@@ -427,18 +429,17 @@ function saveNotificationSettings() {
   state.notificationsEnabled = toggle.checked;
 
   if (state.notificationsEnabled) {
-    requestNotificationPermission().then(granted => {
-      if (!granted) {
-        state.notificationsEnabled = false;
-        toggle.checked = false;
-        saveState();
-      }
-    });
+    const granted = await requestNotificationPermission();
+    if (!granted) {
+      state.notificationsEnabled = false;
+      toggle.checked = false;
+    }
   }
 
   saveState();
   setupReminderCheck();
   updateNotificationStatus();
+  updateReminderStatus();
   showToast('הגדרות נשמרו', 'success');
 }
 
@@ -483,6 +484,17 @@ function updateNotificationStatus(msg) {
   }
 }
 
+function updateReminderStatus() {
+  const el = document.getElementById('reminder-status');
+  if (!el) return;
+
+  const details = state.lastReminderAt
+    ? `נשלחה לאחרונה: ${formatDateTime(new Date(state.lastReminderAt))}`
+    : 'עדיין לא נשלחה תזכורת.';
+
+  el.textContent = `תזכורת נבדקת רק כשהאפליקציה פתוחה (כל דקה). ${details}`;
+}
+
 // ============================================================
 //  תזכורת יומית
 // ============================================================
@@ -506,12 +518,14 @@ function checkReminder() {
   reminderTime.setHours(h, m, 0, 0);
 
   const todayKey  = now.toDateString();
-  const lastKey   = localStorage.getItem('_last-reminder');
+  const legacyLastKey = localStorage.getItem('_last-reminder');
+  const lastKey = state.lastReminderDateKey || legacyLastKey;
   const diffMs    = now - reminderTime;
 
   // שלח אם חלפנו את שעת התזכורת באותה דקה ולא שלחנו היום
   if (diffMs >= 0 && diffMs < 60_000 && lastKey !== todayKey) {
     localStorage.setItem('_last-reminder', todayKey);
+    state.lastReminderDateKey = todayKey;
     sendReminder();
   }
 }
@@ -521,15 +535,22 @@ function sendReminder() {
   const title = 'כושר – תזכורת יומית';
   const body  = 'האם היה אימון כושר היום? 🏋️';
 
-  if ('Notification' in window && Notification.permission === 'granted') {
-    // התראת push אמיתית
-    // TODO: בעתיד – להחליף ב-Firebase Cloud Messaging (FCM)
-    // fcm.sendNotification({ title, body, icon: 'icons/icon-192.png' });
-    new Notification(title, { body, icon: 'icons/icon.svg' });
-  } else {
-    // fallback – toast פנימי
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      // התראת push אמיתית
+      // TODO: בעתיד – להחליף ב-Firebase Cloud Messaging (FCM)
+      // fcm.sendNotification({ title, body, icon: 'icons/icon-192.png' });
+      new Notification(title, { body, icon: 'icons/icon.svg' });
+    } else {
+      // fallback – toast פנימי
+      showToast(`${title}: ${body}`, 'info');
+    }
+  } catch {
     showToast(`${title}: ${body}`, 'info');
   }
+
+  state.lastReminderAt = new Date().toISOString();
+  updateReminderStatus();
 
   // רישום בלוג
   addLogEntry({
@@ -660,6 +681,7 @@ function renderSettings() {
   if (iosNotice) iosNotice.style.display = isIOS() ? 'block' : 'none';
 
   updateNotificationStatus();
+  updateReminderStatus();
   updateCloudSyncStatus();
 }
 
@@ -751,20 +773,14 @@ function importData(event) {
 function resetData() {
   showConfirm(
     'איפוס נתונים',
-    'כל הנתונים יימחקו לצמיתות. האם להמשיך?',
+    'כל הנתונים יימחקו לצמיתות. פעולה זו אינה הפיכה. האם להמשיך?',
     () => {
-      showConfirm(
-        'אישור סופי',
-        'פעולה זו בלתי הפיכה לחלוטין. למחוק הכל?',
-        () => {
-          state = { ...DEFAULT_STATE };
-          localStorage.removeItem('_last-reminder');
-          saveState();
-          updateHomeUI();
-          showScreen('home');
-          showToast('כל הנתונים אופסו', 'warning');
-        }
-      );
+      state = { ...DEFAULT_STATE };
+      localStorage.removeItem('_last-reminder');
+      saveState();
+      updateHomeUI();
+      showScreen('home');
+      showToast('כל הנתונים אופסו', 'warning');
     }
   );
 }
@@ -1022,21 +1038,6 @@ async function init() {
   // מקשי Enter
   setupKeyboardHandlers();
 
-  // תזכורת כשהאפליקציה נפתחה אחרי שעת התזכורת
-  if (state.notificationsEnabled) {
-    const now = new Date();
-    const [h, m] = state.reminderTime.split(':').map(Number);
-    const reminderTime = new Date();
-    reminderTime.setHours(h, m, 0, 0);
-    const todayKey = now.toDateString();
-    const lastKey  = localStorage.getItem('_last-reminder');
-
-    if (now > reminderTime && lastKey !== todayKey) {
-      setTimeout(() => {
-        showToast('תזכורת: האם היה אימון כושר היום? 🏋️', 'info');
-      }, 1500);
-    }
-  }
 }
 
 document.addEventListener('DOMContentLoaded', init);
