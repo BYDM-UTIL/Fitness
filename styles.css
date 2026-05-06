@@ -662,6 +662,185 @@ body {
   line-height: 1.5;
 }
 
+.calendar-card {
+  background: var(--card-bg);
+  border-radius: 18px;
+  padding: 14px;
+  margin-bottom: 12px;
+  box-shadow: 0 2px 8px var(--shadow-strong);
+}
+
+.calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.calendar-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.calendar-today-btn {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.calendar-filters {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.calendar-filter-btn {
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text-sec);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.calendar-filter-btn.active {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: rgba(0, 122, 255, 0.08);
+}
+
+.calendar-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.calendar-nav-btn {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  margin-bottom: 6px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-sec);
+  direction: ltr;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  direction: ltr;
+}
+
+.calendar-day {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 10px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  position: relative;
+  font-weight: 600;
+}
+
+:root[data-theme='dark'] .calendar-day {
+  background: #0f172a;
+}
+
+.calendar-day.none { background: var(--card-bg); }
+.calendar-day.workout {
+  background: rgba(52, 199, 89, 0.22);
+  border-color: rgba(52, 199, 89, 0.45);
+}
+.calendar-day.no-workout {
+  background: rgba(255, 59, 48, 0.22);
+  border-color: rgba(255, 59, 48, 0.45);
+}
+.calendar-day.today {
+  box-shadow: inset 0 0 0 2px var(--blue);
+}
+.calendar-day.selected {
+  outline: 2px solid var(--blue);
+  outline-offset: 0;
+}
+.calendar-day.filtered-out {
+  opacity: 0.25;
+}
+.calendar-day.future .calendar-day-number {
+  opacity: 0.75;
+}
+
+.calendar-day.empty {
+  border: none;
+  background: transparent;
+  pointer-events: none;
+}
+
+.calendar-actions-card {
+  background: var(--card-bg);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+  box-shadow: 0 2px 8px var(--shadow-strong);
+}
+
+.calendar-actions-title {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.calendar-actions-status {
+  font-size: 13px;
+  color: var(--text-sec);
+  margin-bottom: 6px;
+}
+
+.calendar-actions-hint {
+  font-size: 12px;
+  color: var(--text-sec);
+  margin-bottom: 10px;
+}
+
+.calendar-actions-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.summary-section-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-sec);
+  margin: 8px 2px 10px;
+}
+
+.calendar-actions-row .btn:disabled {
+  opacity: 0.45;
+}
+
 .summary-month-card {
   background: var(--card-bg);
   border-radius: 18px;
@@ -685,7 +864,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 .summary-month-title {
@@ -704,8 +883,27 @@ body {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 10px;
+}
+
+.summary-insights-row {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.summary-insight {
+  background: var(--bg);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-sec);
+}
+
+.summary-insight strong {
+  color: var(--text);
 }
 
 .summary-stat {
@@ -720,6 +918,9 @@ body {
   font-weight: 800;
   margin-bottom: 4px;
 }
+
+.summary-stat-value.positive { color: var(--green); }
+.summary-stat-value.negative { color: var(--red); }
 
 .summary-stat-label {
   font-size: 12px;

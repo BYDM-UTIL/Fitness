@@ -21,7 +21,8 @@ let state = {
   totalWorkouts: 0,
   logs:          [],      // cache מקומי בלבד
   theme:         'light',
-  todayReport:   null     // { type: 'workout_done'|'no_workout', logId, date }
+  todayReport:   null,    // { type: 'workout_done'|'no_workout', ... }
+  dailyReportsByDate: {}  // { 'yyyy-mm-dd': { type, isFuture, source, ... } }
 };
 
 let _cloudReady       = false;
@@ -36,8 +37,11 @@ let _workoutLocked    = false;
 let _isHydrating      = false;
 let _cloudProfileUnsub = null;
 let _cloudLogsUnsub    = null;
-let _cloudTodayUnsub   = null;
+let _cloudReportsUnsub = null;
 let _realtimeReady     = false;
+let _calendarViewDate = startOfMonth(new Date());
+let _selectedCalendarDateKey = '';
+let _calendarFilter = 'all';
 
 // ============================================================
 //  Firebase init
@@ -119,7 +123,8 @@ function saveToLocalStorage() {
       totalWorkouts:state.totalWorkouts,
       logs:         state.logs,
       theme:        state.theme,
-      todayReport:  state.todayReport
+      todayReport:  state.todayReport,
+      dailyReportsByDate: state.dailyReportsByDate
     }));
   } catch (e) { console.warn('[Fitness] localStorage save failed:', e); }
 }
@@ -135,7 +140,8 @@ function loadFromLocalStorage() {
         totalWorkouts:typeof p.totalWorkouts=== 'number' ? p.totalWorkouts: 0,
         logs:         Array.isArray(p.logs) ? p.logs : [],
         theme:        p.theme || 'light',
-        todayReport:  p.todayReport || null
+        todayReport:  p.todayReport || null,
+        dailyReportsByDate: (p.dailyReportsByDate && typeof p.dailyReportsByDate === 'object') ? p.dailyReportsByDate : {}
       };
     }
   } catch (e) { /* ignore */ }
@@ -183,10 +189,10 @@ async function hydrateState() {
 }
 
 async function fetchCloudSnapshotOnce() {
-  const [userSnap, logsSnap, todaySnap] = await Promise.all([
+  const [userSnap, logsSnap, reportsSnap] = await Promise.all([
     getUserDocRef().get(),
     getLogsColRef().limit(500).get(),
-    getDailyReportRef(todayDateKey()).get()
+    getUserDocRef().collection('dailyReports').limit(1500).get()
   ]);
 
   if (userSnap.exists) {
@@ -201,7 +207,12 @@ async function fetchCloudSnapshotOnce() {
     .map(doc => ({ id: doc.id, ...doc.data() }))
     .sort((left, right) => getLogSortValue(right) - getLogSortValue(left));
 
-  state.todayReport = todaySnap.exists ? { ...todaySnap.data(), docId: todaySnap.id } : null;
+  const reports = {};
+  reportsSnap.docs.forEach(doc => {
+    reports[doc.id] = { ...doc.data(), docId: doc.id };
+  });
+  state.dailyReportsByDate = reports;
+  state.todayReport = reports[todayDateKey()] || null;
 
   _lastCloudSyncAt = new Date();
   updateCloudSyncStatus();
@@ -227,10 +238,10 @@ function withTimeout(promise, timeoutMs, message) {
 function stopRealtimeSync() {
   _cloudProfileUnsub?.();
   _cloudLogsUnsub?.();
-  _cloudTodayUnsub?.();
+  _cloudReportsUnsub?.();
   _cloudProfileUnsub = null;
   _cloudLogsUnsub = null;
-  _cloudTodayUnsub = null;
+  _cloudReportsUnsub = null;
   _realtimeReady = false;
 }
 
@@ -238,10 +249,10 @@ function startRealtimeSync() {
   if (!_cloudReady) return;
   stopRealtimeSync();
 
-  const initialState = { profile: false, logs: false, today: false };
+  const initialState = { profile: false, logs: false, reports: false };
 
   const tryMarkReady = () => {
-    if (!_realtimeReady && initialState.profile && initialState.logs && initialState.today) {
+    if (!_realtimeReady && initialState.profile && initialState.logs && initialState.reports) {
       _realtimeReady = true;
       _lastCloudSyncAt = new Date();
       _lastCloudError = '';
@@ -288,9 +299,14 @@ function startRealtimeSync() {
     tryMarkReady();
   }, onRealtimeError);
 
-  _cloudTodayUnsub = getDailyReportRef(todayDateKey()).onSnapshot(snapshot => {
-    state.todayReport = snapshot.exists ? { ...snapshot.data(), docId: snapshot.id } : null;
-    initialState.today = true;
+  _cloudReportsUnsub = getUserDocRef().collection('dailyReports').limit(1500).onSnapshot(snapshot => {
+    const reports = {};
+    snapshot.docs.forEach(doc => {
+      reports[doc.id] = { ...doc.data(), docId: doc.id };
+    });
+    state.dailyReportsByDate = reports;
+    state.todayReport = reports[todayDateKey()] || null;
+    initialState.reports = true;
 
     if (_realtimeReady) {
       _lastCloudSyncAt = new Date();
@@ -593,6 +609,203 @@ function buildLogEntry({ type, title, amount, balanceAfter, note = '' }) {
   };
 }
 
+function startOfMonth(date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function dateKeyFromDate(date) {
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+}
+
+function dateFromDateKey(dateKey) {
+  const [y, m, d] = String(dateKey).split('-').map(Number);
+  return new Date(y, (m || 1) - 1, d || 1);
+}
+
+function formatDateKeyForDisplay(dateKey) {
+  const date = dateFromDateKey(dateKey);
+  return date.toLocaleDateString('he-IL', { weekday:'short', year:'numeric', month:'2-digit', day:'2-digit' });
+}
+
+function isFutureDateKey(dateKey) {
+  const target = dateFromDateKey(dateKey);
+  const today = new Date();
+  target.setHours(0,0,0,0);
+  today.setHours(0,0,0,0);
+  return target.getTime() > today.getTime();
+}
+
+function buildLogEntryForDate({ dateKey, type, title, amount, balanceAfter, note = '' }) {
+  const targetDate = dateFromDateKey(dateKey);
+  const now = new Date();
+  const dateStr = targetDate.toLocaleDateString('he-IL', { year:'numeric', month:'2-digit', day:'2-digit' });
+  const timeStr = now.toLocaleTimeString('he-IL', { hour:'2-digit', minute:'2-digit' });
+  const monthKey = `${targetDate.getFullYear()}-${String(targetDate.getMonth()+1).padStart(2,'0')}`;
+
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2,9)}`,
+    type,
+    title,
+    amount,
+    balanceAfter,
+    date: dateStr,
+    time: timeStr,
+    monthKey,
+    note
+  };
+}
+
+function computeDailyFinancialDelta(oldType, newType, dateKey) {
+  if (isFutureDateKey(dateKey)) {
+    return { balanceDelta: 0, workoutDelta: 0 };
+  }
+
+  const price = state.workoutPrice;
+  const oldWorkout = oldType === 'workout_done';
+  const newWorkout = newType === 'workout_done';
+
+  if (oldWorkout === newWorkout) {
+    return { balanceDelta: 0, workoutDelta: 0 };
+  }
+
+  if (!oldWorkout && newWorkout) {
+    return { balanceDelta: -price, workoutDelta: 1 };
+  }
+
+  return { balanceDelta: price, workoutDelta: -1 };
+}
+
+function statusLabel(type) {
+  if (type === 'workout_done') return 'היה אימון';
+  if (type === 'no_workout') return 'לא היה אימון';
+  return 'ללא סימון';
+}
+
+async function setDailyStatus(dateKey, newType, source = 'calendar') {
+  const cloudOk = await initFirebaseCloud();
+  if (!cloudOk) {
+    throw new Error('אין חיבור לענן כרגע');
+  }
+
+  const oldReport = state.dailyReportsByDate[dateKey] || null;
+  const oldType = oldReport?.type || null;
+
+  if (oldType === newType) {
+    return { changed: false, message: 'אין שינוי בסטטוס' };
+  }
+
+  if (isFutureDateKey(dateKey) && newType === 'workout_done') {
+    throw new Error('לא ניתן לסמן אימון עתידי. ניתן לסמן רק "לא יהיה אימון" או לנקות.');
+  }
+
+  const { balanceDelta, workoutDelta } = computeDailyFinancialDelta(oldType, newType, dateKey);
+  const nextBalance = state.balance + balanceDelta;
+  const nextWorkouts = Math.max(0, state.totalWorkouts + workoutDelta);
+
+  if (balanceDelta < 0 && nextBalance < 0) {
+    const shouldContinue = await new Promise(resolve => {
+      showConfirm(
+        'מינוס בקופה',
+        `הפעולה תגרום למינוס של ₪${formatNum(Math.abs(nextBalance))}. להמשיך?`,
+        () => resolve(true),
+        () => resolve(false)
+      );
+    });
+
+    if (!shouldContinue) {
+      return { changed: false, cancelled: true, message: 'הפעולה בוטלה' };
+    }
+  }
+
+  const todayKey = todayDateKey();
+  const isRetro = dateKey !== todayKey;
+  const reportRef = getDailyReportRef(dateKey);
+  const userRef = getUserDocRef();
+  const batch = _firebaseDb.batch();
+
+  const nextReport = newType
+    ? {
+        type: newType,
+        isFuture: isFutureDateKey(dateKey),
+        source,
+        createdAt: oldReport?.createdAt || firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      }
+    : null;
+
+  if (nextReport) {
+    batch.set(reportRef, nextReport, { merge: true });
+  } else {
+    batch.delete(reportRef);
+  }
+
+  batch.set(userRef, {
+    balance: nextBalance,
+    totalWorkouts: nextWorkouts,
+    workoutPrice: state.workoutPrice,
+    theme: state.theme,
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  const noteParts = [
+    `עודכן דרך ${source === 'home' ? 'מסך הבית' : 'קלנדר'}`,
+    `שינוי: ${statusLabel(oldType)} -> ${statusLabel(newType)}`
+  ];
+  if (isRetro) noteParts.push('עדכון רטרואקטיבי');
+
+  const logType = newType || 'status_cleared';
+  const logTitle = newType === 'workout_done'
+    ? 'סימון יום כאימון'
+    : newType === 'no_workout'
+      ? 'סימון יום ללא אימון'
+      : 'ניקוי סימון יום';
+
+  const logRef = getLogsColRef().doc();
+  const logEntry = buildLogEntryForDate({
+    dateKey,
+    type: logType,
+    title: logTitle,
+    amount: balanceDelta,
+    balanceAfter: nextBalance,
+    note: noteParts.join(' | ')
+  });
+  batch.set(logRef, {
+    ...logEntry,
+    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+
+  await batch.commit();
+
+  state.balance = nextBalance;
+  state.totalWorkouts = nextWorkouts;
+  if (nextReport) {
+    state.dailyReportsByDate[dateKey] = {
+      ...oldReport,
+      ...nextReport,
+      docId: dateKey
+    };
+  } else {
+    delete state.dailyReportsByDate[dateKey];
+  }
+  state.todayReport = state.dailyReportsByDate[todayKey] || null;
+
+  state.logs.unshift({ ...logEntry, id: logRef.id });
+  _lastCloudSyncAt = new Date();
+  saveToLocalStorage();
+  refreshAllUI();
+
+  return {
+    changed: true,
+    newType,
+    dateKey,
+    message: newType === 'workout_done'
+      ? `${formatDateKeyForDisplay(dateKey)} סומן כאימון`
+      : newType === 'no_workout'
+        ? `${formatDateKeyForDisplay(dateKey)} סומן ללא אימון`
+        : `הוסר סימון עבור ${formatDateKeyForDisplay(dateKey)}`
+  };
+}
+
 // ============================================================
 //  ניווט
 // ============================================================
@@ -647,49 +860,24 @@ function handleWorkout() {
     }
     showConfirm('עדכון דיווח יומי',
       'כבר נרשם "לא היה אימון" היום. האם לשנות ל"היה אימון"?',
-      () => doWorkout(true));
+      async () => {
+        try {
+          const result = await setDailyStatus(todayDateKey(), 'workout_done', 'home');
+          if (result.changed) showToast('היום סומן כאימון', 'success');
+        } catch (e) {
+          showToast(e.message || 'עדכון נכשל', 'error');
+        }
+      });
     return;
   }
 
-  const price = state.workoutPrice;
-  if (state.balance - price < 0) {
-    showConfirm('מינוס בקופה',
-      `רישום האימון יגרום למינוס של ₪${formatNum(Math.abs(state.balance - price))}. להמשיך?`,
-      () => doWorkout(false));
-    return;
-  }
-
-  doWorkout(false);
-}
-
-async function doWorkout(isUpdate) {
-  const price   = state.workoutPrice;
-  const dateKey = todayDateKey();
-
-  if (isUpdate && state.todayReport) {
-    // no_workout → workout_done: מחק לוג no_workout הקודם
-    if (state.todayReport.logId) {
-      state.logs = state.logs.filter(l => l.id !== state.todayReport.logId);
-      await deleteLogFromCloud(state.todayReport.logId);
-    }
-  }
-
-  state.balance      -= price;
-  state.totalWorkouts += 1;
-
-  const entry = buildLogEntry({
-    type: 'workout_done', title: 'אימון כושר',
-    amount: -price, balanceAfter: state.balance
-  });
-  state.logs.unshift(entry);
-  const cloudId = await addLogToCloud(entry);
-  entry.id = cloudId;
-
-  state.todayReport = { type: 'workout_done', logId: cloudId, date: dateKey };
-  await saveDailyReport(dateKey, { type: 'workout_done', logId: cloudId, date: dateKey });
-  await saveUserDoc();
-  updateHomeUI();
-  showToast('האימון נרשם! 💪', 'success');
+  setDailyStatus(todayDateKey(), 'workout_done', 'home')
+    .then(result => {
+      if (result.changed) showToast('היום סומן כאימון', 'success');
+    })
+    .catch(error => {
+      showToast(error.message || 'עדכון נכשל', 'error');
+    });
 }
 
 function skipWorkout() {
@@ -704,41 +892,24 @@ function skipWorkout() {
     }
     showConfirm('עדכון דיווח יומי',
       'כבר נרשם אימון היום. האם לשנות ל"לא היה אימון"? הכסף יוחזר.',
-      () => doSkip(true));
+      async () => {
+        try {
+          const result = await setDailyStatus(todayDateKey(), 'no_workout', 'home');
+          if (result.changed) showToast('היום סומן ללא אימון', 'success');
+        } catch (e) {
+          showToast(e.message || 'עדכון נכשל', 'error');
+        }
+      });
     return;
   }
 
-  doSkip(false);
-}
-
-async function doSkip(isUpdate) {
-  const dateKey = todayDateKey();
-
-  if (isUpdate && state.todayReport) {
-    if (state.todayReport.type === 'workout_done') {
-      // החזר כסף
-      state.balance      += state.workoutPrice;
-      state.totalWorkouts = Math.max(0, state.totalWorkouts - 1);
-    }
-    if (state.todayReport.logId) {
-      state.logs = state.logs.filter(l => l.id !== state.todayReport.logId);
-      await deleteLogFromCloud(state.todayReport.logId);
-    }
-  }
-
-  const entry = buildLogEntry({
-    type: 'no_workout', title: 'לא היה אימון',
-    amount: 0, balanceAfter: state.balance
-  });
-  state.logs.unshift(entry);
-  const cloudId = await addLogToCloud(entry);
-  entry.id = cloudId;
-
-  state.todayReport = { type: 'no_workout', logId: cloudId, date: dateKey };
-  await saveDailyReport(dateKey, { type: 'no_workout', logId: cloudId, date: dateKey });
-  await saveUserDoc();
-  updateHomeUI();
-  showToast('נרשם: לא היה אימון היום', 'info');
+  setDailyStatus(todayDateKey(), 'no_workout', 'home')
+    .then(result => {
+      if (result.changed) showToast('היום סומן ללא אימון', 'success');
+    })
+    .catch(error => {
+      showToast(error.message || 'עדכון נכשל', 'error');
+    });
 }
 
 // ============================================================
@@ -920,6 +1091,7 @@ function renderJournal() {
 const LOG_CONFIG = {
   workout_done:   { icon:'🏋️', color:'red',   label:'אימון'           },
   no_workout:     { icon:'⏭️', color:'gray',  label:'לא היה אימון'    },
+  status_cleared: { icon:'🧹', color:'gray',  label:'נוקה סימון'       },
   money_added:    { icon:'💰', color:'green', label:'הוספת כסף'       },
   balance_set:    { icon:'✏️', color:'blue',  label:'עדכון יתרה'      },
   price_changed:  { icon:'🏷️', color:'blue',  label:'שינוי מחיר'      },
@@ -957,44 +1129,253 @@ function buildJournalEntryHTML(entry) {
 function renderMonthlySummary() {
   const container = document.getElementById('monthly-summary-container');
   if (!container) return;
-  if (state.logs.length === 0) {
-    container.innerHTML = `<div class="empty-state"><div class="empty-icon">📆</div><h3>אין עדיין נתונים חודשיים</h3></div>`;
-    return;
+  const monthDate = _calendarViewDate instanceof Date ? _calendarViewDate : startOfMonth(new Date());
+  const monthKey = `${monthDate.getFullYear()}-${String(monthDate.getMonth() + 1).padStart(2, '0')}`;
+  const currentMonthKey = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+  const monthLabel = monthDate.toLocaleDateString('he-IL', { year:'numeric', month:'long' });
+
+  const dayCells = buildCalendarDayCells(monthDate).map(day => {
+    if (!day.dateKey) {
+      return '<div class="calendar-day empty"></div>';
+    }
+
+    const report = state.dailyReportsByDate[day.dateKey] || null;
+    const statusClass = report?.type === 'workout_done'
+      ? 'workout'
+      : report?.type === 'no_workout'
+        ? 'no-workout'
+        : 'none';
+
+    const selectedClass = _selectedCalendarDateKey === day.dateKey ? 'selected' : '';
+    const todayClass = day.isToday ? 'today' : '';
+    const futureClass = day.isFuture ? 'future' : '';
+    const isFilteredOut = _calendarFilter === 'workout'
+      ? report?.type !== 'workout_done'
+      : _calendarFilter === 'no-workout'
+        ? report?.type !== 'no_workout'
+        : false;
+    const filterClass = isFilteredOut ? 'filtered-out' : '';
+
+    return `
+      <button
+        type="button"
+        class="calendar-day ${statusClass} ${selectedClass} ${todayClass} ${futureClass} ${filterClass}"
+        onclick="selectCalendarDate('${day.dateKey}')"
+        aria-label="${formatDateKeyForDisplay(day.dateKey)} - ${statusLabel(report?.type)}">
+        <span class="calendar-day-number">${day.dayNumber}</span>
+      </button>`;
+  }).join('');
+
+  const selectedDateKey = _selectedCalendarDateKey || (monthKey === currentMonthKey
+    ? todayDateKey()
+    : `${monthKey}-01`);
+  const selectedReport = state.dailyReportsByDate[selectedDateKey] || null;
+  const selectedFuture = isFutureDateKey(selectedDateKey);
+  const actionHint = selectedFuture
+    ? 'יום עתידי: ניתן לסמן רק "לא יהיה אימון" או לנקות סימון'
+    : 'יום עבר/היום: שינוי סטטוס יעדכן גם יתרה ומספר שיעורים';
+
+  const summaries = buildMonthlySummaries();
+  const statsHtml = summaries.length
+    ? summaries.map(summary => {
+        const isCurrent = summary.monthKey === monthKey;
+        const netClass = summary.net >= 0 ? 'positive' : 'negative';
+        const endBalanceText = summary.endBalance == null
+          ? '—'
+          : `₪${formatNum(summary.endBalance)}`;
+        return `
+          <div class="summary-month-card${isCurrent ? ' current' : ''}">
+            <div class="summary-month-header-row">
+              <div class="summary-month-title">${escapeHTML(summary.label)}</div>
+              <div class="summary-month-badge">${isCurrent ? 'החודש' : 'סיכום'}</div>
+            </div>
+            <div class="summary-insights-row">
+              <div class="summary-insight">דיווח חודשי: <strong>${summary.reportedDays}/${summary.daysInMonth}</strong></div>
+              <div class="summary-insight">כיסוי: <strong>${summary.completionRate}%</strong></div>
+            </div>
+            <div class="summary-grid">
+              <div class="summary-stat"><div class="summary-stat-value">${summary.workoutDays}</div><div class="summary-stat-label">ימי אימון</div></div>
+              <div class="summary-stat"><div class="summary-stat-value">${summary.noWorkoutDays}</div><div class="summary-stat-label">ימים ללא אימון</div></div>
+              <div class="summary-stat"><div class="summary-stat-value">₪${formatNum(summary.added)}</div><div class="summary-stat-label">כסף שנוסף</div></div>
+              <div class="summary-stat"><div class="summary-stat-value">₪${formatNum(summary.spent)}</div><div class="summary-stat-label">כסף שירד</div></div>
+              <div class="summary-stat"><div class="summary-stat-value ${netClass}">${summary.net >= 0 ? '+' : ''}₪${formatNum(summary.net)}</div><div class="summary-stat-label">מאזן חודשי</div></div>
+              <div class="summary-stat"><div class="summary-stat-value">${endBalanceText}</div><div class="summary-stat-label">יתרה בסוף חודש</div></div>
+            </div>
+          </div>`;
+      }).join('')
+    : `<div class="empty-state"><div class="empty-icon">📆</div><h3>אין עדיין נתונים חודשיים</h3></div>`;
+
+  container.innerHTML = `
+    <div class="calendar-card">
+      <div class="calendar-header">
+        <button type="button" class="calendar-nav-btn" onclick="changeCalendarMonth(-1)" aria-label="חודש קודם">◀</button>
+        <div class="calendar-title">${escapeHTML(monthLabel)}</div>
+        <button type="button" class="calendar-nav-btn" onclick="changeCalendarMonth(1)" aria-label="חודש הבא">▶</button>
+      </div>
+      <div class="calendar-toolbar">
+        <button type="button" class="calendar-today-btn" onclick="goToTodayInCalendar()">חזור להיום</button>
+        <div class="calendar-filters" role="group" aria-label="סינון ימים">
+          <button type="button" class="calendar-filter-btn ${_calendarFilter === 'all' ? 'active' : ''}" onclick="setCalendarFilter('all')">הכול</button>
+          <button type="button" class="calendar-filter-btn ${_calendarFilter === 'workout' ? 'active' : ''}" onclick="setCalendarFilter('workout')">רק אימונים</button>
+          <button type="button" class="calendar-filter-btn ${_calendarFilter === 'no-workout' ? 'active' : ''}" onclick="setCalendarFilter('no-workout')">רק ללא אימון</button>
+        </div>
+      </div>
+      <div class="calendar-weekdays">
+        <span>א</span><span>ב</span><span>ג</span><span>ד</span><span>ה</span><span>ו</span><span>ש</span>
+      </div>
+      <div class="calendar-grid">${dayCells}</div>
+    </div>
+
+    <div class="calendar-actions-card">
+      <div class="calendar-actions-title">${formatDateKeyForDisplay(selectedDateKey)}</div>
+      <div class="calendar-actions-status">סטטוס נוכחי: <strong>${statusLabel(selectedReport?.type)}</strong></div>
+      <div class="calendar-actions-hint">${actionHint}</div>
+      <div class="calendar-actions-row">
+        <button type="button" class="btn btn-primary btn-sm" ${selectedFuture ? 'disabled' : ''} onclick="setCalendarDayStatus('workout_done')">היה אימון</button>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="setCalendarDayStatus('no_workout')">לא היה אימון</button>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="setCalendarDayStatus('clear')">נקה סימון</button>
+      </div>
+    </div>
+
+    <div class="summary-section-title">סטטיסטיקות קיימות</div>
+    ${statsHtml}
+  `;
+}
+
+function buildCalendarDayCells(monthDate) {
+  const year = monthDate.getFullYear();
+  const month = monthDate.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  const cells = [];
+
+  const leadingBlanks = firstDay.getDay();
+  for (let i = 0; i < leadingBlanks; i += 1) {
+    cells.push({ dateKey: '', dayNumber: '', isToday: false, isFuture: false });
   }
-  const currentMK = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
-  const summaries  = buildMonthlySummaries();
-  container.innerHTML = summaries.map(s => `
-    <div class="summary-month-card${s.monthKey === currentMK ? ' current' : ''}">
-      <div class="summary-month-header-row">
-        <div class="summary-month-title">${escapeHTML(s.label)}</div>
-        <div class="summary-month-badge">${s.monthKey === currentMK ? 'החודש' : 'סיכום'}</div>
-      </div>
-      <div class="summary-grid">
-        <div class="summary-stat"><div class="summary-stat-value">${s.workoutDays}</div><div class="summary-stat-label">ימי אימון</div></div>
-        <div class="summary-stat"><div class="summary-stat-value">${s.noWorkoutDays}</div><div class="summary-stat-label">ללא אימון</div></div>
-        <div class="summary-stat"><div class="summary-stat-value">₪${formatNum(s.added)}</div><div class="summary-stat-label">כסף נוסף</div></div>
-        <div class="summary-stat"><div class="summary-stat-value">₪${formatNum(s.spent)}</div><div class="summary-stat-label">כסף ירד</div></div>
-      </div>
-    </div>`).join('');
+
+  for (let day = 1; day <= lastDay.getDate(); day += 1) {
+    const date = new Date(year, month, day);
+    const dateKey = dateKeyFromDate(date);
+    const isToday = dateKey === todayDateKey();
+    const isFuture = isFutureDateKey(dateKey);
+    cells.push({ dateKey, dayNumber: day, isToday, isFuture });
+  }
+
+  while (cells.length % 7 !== 0) {
+    cells.push({ dateKey: '', dayNumber: '', isToday: false, isFuture: false });
+  }
+
+  return cells;
+}
+
+function changeCalendarMonth(delta) {
+  _calendarViewDate = new Date(_calendarViewDate.getFullYear(), _calendarViewDate.getMonth() + delta, 1);
+  _selectedCalendarDateKey = '';
+  renderMonthlySummary();
+}
+
+function selectCalendarDate(dateKey) {
+  if (!dateKey) return;
+  _selectedCalendarDateKey = dateKey;
+  renderMonthlySummary();
+}
+
+function goToTodayInCalendar() {
+  const today = new Date();
+  _calendarViewDate = startOfMonth(today);
+  _selectedCalendarDateKey = todayDateKey();
+  renderMonthlySummary();
+}
+
+function setCalendarFilter(filter) {
+  _calendarFilter = ['all', 'workout', 'no-workout'].includes(filter) ? filter : 'all';
+  renderMonthlySummary();
+}
+
+async function setCalendarDayStatus(status) {
+  const dateKey = _selectedCalendarDateKey || todayDateKey();
+  const normalized = status === 'clear' ? null : status;
+
+  try {
+    const result = await setDailyStatus(dateKey, normalized, 'calendar');
+    if (result?.changed) {
+      showToast(result.message, 'success');
+    } else if (result?.cancelled) {
+      showToast('הפעולה בוטלה', 'info');
+    } else {
+      showToast(result?.message || 'אין שינוי', 'info');
+    }
+  } catch (error) {
+    showToast(error.message || 'עדכון קלנדר נכשל', 'error');
+  }
+
+  renderMonthlySummary();
 }
 
 function buildMonthlySummaries() {
   const grouped = new Map();
-  state.logs.forEach(entry => {
-    const mk = entry.monthKey || deriveMonthKey(entry.date);
+  const ensureSummary = mk => {
     if (!grouped.has(mk)) {
       const [y, m] = mk.split('-');
+      const daysInMonth = new Date(Number(y), Number(m), 0).getDate();
       grouped.set(mk, {
         monthKey: mk,
         label: new Date(Number(y), Number(m)-1, 1).toLocaleDateString('he-IL', { year:'numeric', month:'long' }),
-        workoutDays: 0, noWorkoutDays: 0, spent: 0, added: 0
+        daysInMonth,
+        workoutDays: 0,
+        noWorkoutDays: 0,
+        spent: 0,
+        added: 0,
+        endBalance: null,
+        net: 0,
+        reportedDays: 0,
+        completionRate: 0
       });
     }
-    const t = grouped.get(mk);
-    if (entry.type === 'workout_done') { t.workoutDays++;   t.spent += Math.abs(Number(entry.amount)||0); }
-    if (entry.type === 'no_workout')   { t.noWorkoutDays++; }
-    if ((Number(entry.amount)||0) > 0) { t.added += Number(entry.amount)||0; }
+    return grouped.get(mk);
+  };
+
+  state.logs.forEach(entry => {
+    const mk = entry.monthKey || deriveMonthKey(entry.date);
+    const t = ensureSummary(mk);
+    if ((Number(entry.amount)||0) > 0) {
+      t.added += Number(entry.amount)||0;
+    }
+
+    const sortValue = getLogSortValue(entry);
+    const currentSortValue = t._endBalanceSortValue || 0;
+    if (sortValue >= currentSortValue && Number.isFinite(Number(entry.balanceAfter))) {
+      t.endBalance = Number(entry.balanceAfter);
+      t._endBalanceSortValue = sortValue;
+    }
   });
+
+  Object.entries(state.dailyReportsByDate || {}).forEach(([dateKey, report]) => {
+    if (!report || !report.type) return;
+    const [year, month] = dateKey.split('-');
+    const mk = `${year}-${month}`;
+    const t = ensureSummary(mk);
+
+    if (report.type === 'workout_done') {
+      t.workoutDays += 1;
+      t.spent += state.workoutPrice;
+    }
+    if (report.type === 'no_workout') {
+      t.noWorkoutDays += 1;
+    }
+  });
+
+  grouped.forEach(summary => {
+    summary.reportedDays = summary.workoutDays + summary.noWorkoutDays;
+    summary.net = summary.added - summary.spent;
+    summary.completionRate = summary.daysInMonth > 0
+      ? Math.round((summary.reportedDays / summary.daysInMonth) * 100)
+      : 0;
+
+    delete summary._endBalanceSortValue;
+  });
+
   return Array.from(grouped.values()).sort((a,b) => b.monthKey.localeCompare(a.monthKey));
 }
 
@@ -1463,7 +1844,6 @@ function setupKeyboardHandlers() {
 // ============================================================
 async function init() {
   await hydrateState();
-  recalculateFromLogs();
   applyTheme(state.theme || 'light');
   refreshAllUI();
   updateDebugPanel();
