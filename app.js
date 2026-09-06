@@ -39,6 +39,7 @@ let _cloudProfileUnsub = null;
 let _cloudLogsUnsub    = null;
 let _cloudReportsUnsub = null;
 let _realtimeReady     = false;
+let _lastInitialSyncDurationMs = null;
 let _calendarViewDate = startOfMonth(new Date());
 let _selectedCalendarDateKey = '';
 let _calendarFilter = 'all';
@@ -169,8 +170,9 @@ async function hydrateState() {
 
     await ensureSharedProfileInitialized();
 
-    await withTimeout(fetchCloudSnapshotOnce(), 8000, 'טעינת ענן לקחה יותר מדי זמן');
-    startRealtimeSync();
+    const syncStartedAt = performance.now();
+    await withTimeout(startRealtimeSync(), 8000, 'טעינת ענן לקחה יותר מדי זמן');
+    _lastInitialSyncDurationMs = Math.round(performance.now() - syncStartedAt);
     _lastCloudError = '';
     return true;
   } catch (e) {
@@ -246,75 +248,79 @@ function stopRealtimeSync() {
 }
 
 function startRealtimeSync() {
-  if (!_cloudReady) return;
+  if (!_cloudReady) return Promise.resolve(false);
   stopRealtimeSync();
 
-  const initialState = { profile: false, logs: false, reports: false };
+  return new Promise((resolve, reject) => {
+    const initialState = { profile: false, logs: false, reports: false };
 
-  const tryMarkReady = () => {
-    if (!_realtimeReady && initialState.profile && initialState.logs && initialState.reports) {
-      _realtimeReady = true;
-      _lastCloudSyncAt = new Date();
-      _lastCloudError = '';
+    const tryMarkReady = () => {
+      if (!_realtimeReady && initialState.profile && initialState.logs && initialState.reports) {
+        _realtimeReady = true;
+        _lastCloudSyncAt = new Date();
+        _lastCloudError = '';
+        updateCloudSyncStatus();
+        saveToLocalStorage();
+        refreshAllUI();
+        resolve(true);
+      }
+    };
+
+    const onRealtimeError = error => {
+      console.warn('[Fitness] realtime sync failed:', error);
+      _lastCloudError = String(error?.message || error || 'Realtime נכשל');
+      _realtimeReady = false;
       updateCloudSyncStatus();
-      saveToLocalStorage();
-      refreshAllUI();
-    }
-  };
+      reject(error);
+    };
 
-  const onRealtimeError = error => {
-    console.warn('[Fitness] realtime sync failed:', error);
-    _lastCloudError = String(error?.message || error || 'Realtime נכשל');
-    _realtimeReady = false;
-    updateCloudSyncStatus();
-  };
+    _cloudProfileUnsub = getUserDocRef().onSnapshot(snapshot => {
+      const data = snapshot.exists ? (snapshot.data() || {}) : {};
+      state.balance = typeof data.balance === 'number' ? data.balance : 0;
+      state.workoutPrice = typeof data.workoutPrice === 'number' ? data.workoutPrice : 80;
+      state.totalWorkouts = typeof data.totalWorkouts === 'number' ? data.totalWorkouts : 0;
+      state.theme = data.theme || 'light';
+      initialState.profile = true;
 
-  _cloudProfileUnsub = getUserDocRef().onSnapshot(snapshot => {
-    const data = snapshot.exists ? (snapshot.data() || {}) : {};
-    state.balance = typeof data.balance === 'number' ? data.balance : 0;
-    state.workoutPrice = typeof data.workoutPrice === 'number' ? data.workoutPrice : 80;
-    state.totalWorkouts = typeof data.totalWorkouts === 'number' ? data.totalWorkouts : 0;
-    state.theme = data.theme || 'light';
-    initialState.profile = true;
+      if (_realtimeReady) {
+        _lastCloudSyncAt = new Date();
+        saveToLocalStorage();
+        refreshAllUI();
+      }
+      tryMarkReady();
+    }, onRealtimeError);
 
-    if (_realtimeReady) {
-      _lastCloudSyncAt = new Date();
-      saveToLocalStorage();
-      refreshAllUI();
-    }
-    tryMarkReady();
-  }, onRealtimeError);
+    _cloudLogsUnsub = getLogsColRef().limit(500).onSnapshot(snapshot => {
+      state.logs = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .sort((left, right) => getLogSortValue(right) - getLogSortValue(left));
+      initialState.logs = true;
 
-  _cloudLogsUnsub = getLogsColRef().limit(500).onSnapshot(snapshot => {
-    state.logs = snapshot.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
-      .sort((left, right) => getLogSortValue(right) - getLogSortValue(left));
-    initialState.logs = true;
+      if (_realtimeReady) {
+        _lastCloudSyncAt = new Date();
+        saveToLocalStorage();
+        refreshAllUI();
+      }
+      tryMarkReady();
+    }, onRealtimeError);
 
-    if (_realtimeReady) {
-      _lastCloudSyncAt = new Date();
-      saveToLocalStorage();
-      refreshAllUI();
-    }
-    tryMarkReady();
-  }, onRealtimeError);
+    _cloudReportsUnsub = getUserDocRef().collection('dailyReports').limit(1500).onSnapshot(snapshot => {
+      const reports = {};
+      snapshot.docs.forEach(doc => {
+        reports[doc.id] = { ...doc.data(), docId: doc.id };
+      });
+      state.dailyReportsByDate = reports;
+      state.todayReport = reports[todayDateKey()] || null;
+      initialState.reports = true;
 
-  _cloudReportsUnsub = getUserDocRef().collection('dailyReports').limit(1500).onSnapshot(snapshot => {
-    const reports = {};
-    snapshot.docs.forEach(doc => {
-      reports[doc.id] = { ...doc.data(), docId: doc.id };
-    });
-    state.dailyReportsByDate = reports;
-    state.todayReport = reports[todayDateKey()] || null;
-    initialState.reports = true;
-
-    if (_realtimeReady) {
-      _lastCloudSyncAt = new Date();
-      saveToLocalStorage();
-      refreshAllUI();
-    }
-    tryMarkReady();
-  }, onRealtimeError);
+      if (_realtimeReady) {
+        _lastCloudSyncAt = new Date();
+        saveToLocalStorage();
+        refreshAllUI();
+      }
+      tryMarkReady();
+    }, onRealtimeError);
+  });
 }
 
 async function ensureSharedProfileInitialized() {
@@ -1619,6 +1625,7 @@ function updateDebugPanel() {
   setDebugValue('debug-realtime-ready', _realtimeReady ? 'true' : 'false');
   setDebugValue('debug-profile-id', SHARED_PROFILE_ID);
   setDebugValue('debug-last-sync', _lastCloudSyncAt ? formatDateTime(_lastCloudSyncAt) : '-');
+  setDebugValue('debug-initial-sync-ms', _lastInitialSyncDurationMs == null ? '-' : `${_lastInitialSyncDurationMs} ms`);
   setDebugValue('debug-last-error', _lastCloudError || '-');
   setDebugValue('debug-logs-count', Array.isArray(state.logs) ? state.logs.length : 0);
   setDebugValue('debug-today-report', state.todayReport?.type || 'none');
