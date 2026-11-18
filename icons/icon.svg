@@ -1,18 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <!-- רקע כחול עם פינות מעוגלות – סגנון iOS -->
-  <rect width="100" height="100" rx="22" ry="22" fill="#007AFF"/>
-
-  <!-- אייקון דמבל לבן -->
-  <g fill="white">
-    <!-- צלחת שמאל פנימית -->
-    <rect x="4"  y="38" width="6"  height="24" rx="3"/>
-    <!-- משקולת שמאל -->
-    <rect x="10" y="33" width="14" height="34" rx="4"/>
-    <!-- מוט מרכזי -->
-    <rect x="24" y="44" width="52" height="12" rx="4"/>
-    <!-- משקולת ימין -->
-    <rect x="76" y="33" width="14" height="34" rx="4"/>
-    <!-- צלחת ימין פנימית -->
-    <rect x="90" y="38" width="6"  height="24" rx="3"/>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#0097FF"/>
+      <stop offset="1" stop-color="#0052CC"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#background)" d="M0 0h100v100H0z"/>
+  <circle cx="50" cy="50" r="36" fill="#FFFFFF" fill-opacity=".08"/>
+  <g fill="#FFFFFF" transform="rotate(-35 50 50)">
+    <rect x="20" y="40" width="6" height="20" rx="3"/>
+    <rect x="26" y="34" width="11" height="32" rx="4"/>
+    <rect x="37" y="46" width="26" height="8" rx="3"/>
+    <rect x="63" y="34" width="11" height="32" rx="4"/>
+    <rect x="74" y="40" width="6" height="20" rx="3"/>
   </g>
+  <circle cx="72" cy="28" r="5" fill="#60F5D0"/>
 </svg>

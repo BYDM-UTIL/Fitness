@@ -33,6 +33,7 @@ let _cloudInitError   = '';
 let _lastCloudError   = '';
 let _editingEntryId   = null;
 let _isPullRefreshing = false;
+let _hydratePromise  = null;
 let _workoutLocked    = false;
 let _isHydrating      = false;
 let _cloudProfileUnsub = null;
@@ -152,8 +153,18 @@ function loadFromLocalStorage() {
 // ============================================================
 //  טעינה מהענן
 // ============================================================
-async function hydrateState() {
+function hydrateState() {
+  if (_hydratePromise) return _hydratePromise;
+
+  _hydratePromise = hydrateStateInternal().finally(() => {
+    _hydratePromise = null;
+  });
+  return _hydratePromise;
+}
+
+async function hydrateStateInternal() {
   const local = loadFromLocalStorage();
+  const syncStartedAt = performance.now();
   _isHydrating = true;
   setLoadingState(true, 'טוען נתונים מהענן...');
 
@@ -170,9 +181,7 @@ async function hydrateState() {
 
     await ensureSharedProfileInitialized();
 
-    const syncStartedAt = performance.now();
     await withTimeout(startRealtimeSync(), 8000, 'טעינת ענן לקחה יותר מדי זמן');
-    _lastInitialSyncDurationMs = Math.round(performance.now() - syncStartedAt);
     _lastCloudError = '';
     return true;
   } catch (e) {
@@ -185,8 +194,10 @@ async function hydrateState() {
     updateCloudSyncStatus('שגיאת סנכרון – עובד מקומית');
     return false;
   } finally {
+    _lastInitialSyncDurationMs = Math.round(performance.now() - syncStartedAt);
     _isHydrating = false;
     setLoadingState(false);
+    updateDebugPanel();
   }
 }
 
@@ -328,6 +339,10 @@ async function ensureSharedProfileInitialized() {
   const sharedSnap = await sharedRef.get();
   if (sharedSnap.exists) {
     const sharedData = sharedSnap.data() || {};
+    if (hasMeaningfulSharedProfileData(sharedData)) {
+      return;
+    }
+
     const sharedLogs = await sharedRef.collection('logs').limit(1).get();
     if (!shouldBootstrapSharedProfile(sharedData, sharedLogs.empty)) {
       return;
@@ -335,10 +350,13 @@ async function ensureSharedProfileInitialized() {
   }
 
   const personalRef = getPersonalUserDocRef();
-  const personalSnap = personalRef ? await personalRef.get() : { exists: false, data: () => null };
-  const legacySnap = _firebaseUid
-    ? await _firebaseDb.collection('fitnessStates').doc(_firebaseUid).get()
-    : { exists: false, data: () => null };
+  const personalPromise = personalRef
+    ? personalRef.get()
+    : Promise.resolve({ exists: false, data: () => null });
+  const legacyPromise = _firebaseUid
+    ? _firebaseDb.collection('fitnessStates').doc(_firebaseUid).get()
+    : Promise.resolve({ exists: false, data: () => null });
+  const [personalSnap, legacySnap] = await Promise.all([personalPromise, legacyPromise]);
   const localState = loadFromLocalStorage();
   const bootstrap = buildBootstrapSource(personalSnap, legacySnap, localState);
 
@@ -367,15 +385,17 @@ async function ensureSharedProfileInitialized() {
   }
 }
 
-function shouldBootstrapSharedProfile(sharedData, sharedLogsEmpty) {
-  const hasMeaningfulSharedData =
-    Boolean(sharedData.resetAt) ||
+function hasMeaningfulSharedProfileData(sharedData) {
+  return Boolean(
+    sharedData.resetAt ||
     (typeof sharedData.balance === 'number' && sharedData.balance !== 0) ||
     (typeof sharedData.totalWorkouts === 'number' && sharedData.totalWorkouts !== 0) ||
-    (typeof sharedData.workoutPrice === 'number' && sharedData.workoutPrice !== 80) ||
-    !sharedLogsEmpty;
+    (typeof sharedData.workoutPrice === 'number' && sharedData.workoutPrice !== 80)
+  );
+}
 
-  return !hasMeaningfulSharedData;
+function shouldBootstrapSharedProfile(sharedData, sharedLogsEmpty) {
+  return !hasMeaningfulSharedProfileData(sharedData) && sharedLogsEmpty;
 }
 
 function buildBootstrapSource(personalSnap, legacySnap, localState) {
@@ -1770,39 +1790,6 @@ function _closeConfirm() {
 }
 
 // ============================================================
-//  Apple touch icon
-// ============================================================
-function generateCanvasIcon(size) {
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  const r = size * 0.22;
-  ctx.fillStyle = '#007AFF';
-  ctx.beginPath();
-  _roundRectPath(ctx, 0, 0, size, size, r);
-  ctx.fill();
-  ctx.fillStyle = 'white';
-  const s = size / 100;
-  _fillRoundRect(ctx,  4*s, 38*s,  6*s, 24*s, 3*s);
-  _fillRoundRect(ctx, 10*s, 33*s, 14*s, 34*s, 4*s);
-  _fillRoundRect(ctx, 24*s, 44*s, 52*s, 12*s, 3*s);
-  _fillRoundRect(ctx, 76*s, 33*s, 14*s, 34*s, 4*s);
-  _fillRoundRect(ctx, 90*s, 38*s,  6*s, 24*s, 3*s);
-  return canvas.toDataURL('image/png');
-}
-
-function _roundRectPath(ctx, x, y, w, h, r) {
-  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
-  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
-  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
-  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
-}
-
-function _fillRoundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath(); _roundRectPath(ctx, x, y, w, h, r); ctx.fill();
-}
-
-// ============================================================
 //  Service Worker
 // ============================================================
 async function registerServiceWorker() {
@@ -1854,12 +1841,6 @@ async function init() {
   applyTheme(state.theme || 'light');
   refreshAllUI();
   updateDebugPanel();
-
-  try {
-    const iconURL = generateCanvasIcon(192);
-    const link = document.getElementById('apple-touch-icon');
-    if (link) link.href = iconURL;
-  } catch (e) { /* ignore */ }
 
   await registerServiceWorker();
   setupKeyboardHandlers();

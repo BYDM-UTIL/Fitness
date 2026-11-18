@@ -33,16 +33,26 @@ npx firebase-tools use --add
 
 Select your Firebase project.
 
-## 6) Deploy rules and hosting
-Run:
+## 6) Deploy
+For frontend-only releases, deploy Hosting only:
+
+npx firebase-tools deploy --only hosting
+
+This updates the hosted app without deploying Firestore rules or changing Firestore data.
+
+Deploy Firestore rules separately only when you intentionally change the rules:
 
 npx firebase-tools deploy --only firestore:rules
-npx firebase-tools deploy --only hosting
 
 ## 7) Open on iPhone
 1. Open your Hosting URL (https://<project-id>.web.app) in Safari
 2. Share -> Add to Home Screen
 3. Launch from the icon
+
+### Version 1.1 icons
+- The favicon, PWA icons, and Apple touch icon share the design in `icons/icon.svg`.
+- To regenerate the PNG assets with the optional `canvas` package available, run `node generate-icons.js`.
+- Existing iOS Home Screen icons may retain the old artwork. Only after confirming cloud sync and saving a backup, remove the Home Screen shortcut and add it again from Safari. Do not clear Safari website data.
 
 ### iPhone note
 - In the current stable app mode, iPhone uses local reminders only.
